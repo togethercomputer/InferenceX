@@ -2610,3 +2610,10 @@
   description:
     - "Update SGLang image from v0.5.10-rocm720-mi30x to v0.5.12-rocm720-mi30x"
   pr-link: https://github.com/SemiAnalysisAI/InferenceX/pull/1429
+
+- config-keys:
+    - dsr1-fp8-b200-sglang
+    - dsr1-fp8-b200-sglang-mtp
+  description:
+    - "Update SGLang image from v0.5.11-cu130 to v0.5.12-cu130"
+  pr-link: https://github.com/SemiAnalysisAI/InferenceX/pull/1416
