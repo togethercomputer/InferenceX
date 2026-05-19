@@ -2901,3 +2901,9 @@
   description:
     - "Add MI355X config: qwen3.5-fp4-sglang-mtp using lmsysorg/sglang-rocm:v0.5.12-rocm720-mi35x-20260517"
   pr-link: https://github.com/SemiAnalysisAI/InferenceX/pull/1445
+
+- config-keys:
+    - dsr1-fp4-mi355x-sglang
+  description:
+    - "Update SGLang image to v0.5.12-rocm700-mi35x"
+  pr-link: https://github.com/SemiAnalysisAI/InferenceX/pull/1431
