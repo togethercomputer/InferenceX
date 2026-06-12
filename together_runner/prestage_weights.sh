@@ -9,7 +9,7 @@
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$HERE/config.env"
-source "$HERE/sglang_lib.sh"
+source "$HERE/bench_lib.sh"
 
 check_env_vars MODEL PROFILE MODELS_ROOT || exit 1
 
@@ -30,11 +30,16 @@ run_hf() {
     if command -v hf >/dev/null 2>&1; then
         HF_TOKEN="${HF_TOKEN:-}" hf "$@"
     else
+        # Override the image entrypoint (e.g. vllm/vllm-openai's is `vllm`) and run
+        # the HF CLI directly. No --gpus needed; prefer `hf`, fall back to
+        # `huggingface-cli`. Args are requoted for the inner shell.
+        local a; a=$(printf '%q ' "$@")
         docker run --rm \
             -e HF_TOKEN="${HF_TOKEN:-}" \
             -v "$MODELS_ROOT:$MODELS_ROOT" \
             -v "$HF_CACHE:/root/.cache/huggingface" \
-            "$IMAGE" hf "$@"
+            --entrypoint bash "$IMAGE" -lc \
+            "if command -v hf >/dev/null 2>&1; then hf $a; else huggingface-cli $a; fi"
     fi
 }
 
@@ -60,4 +65,4 @@ trlog "DONE in $(_fmt_dur "$(run_elapsed)"). Staged at: $DEST"
 echo
 echo "To use the pre-staged weights (zero-download launch), export:"
 echo "    export MODEL_PATH=\"$DEST\""
-echo "run_all.sh / run_sglang_2 auto-detect this via the .ready marker."
+echo "run_all.sh / run_2 auto-detect this via the .ready marker."

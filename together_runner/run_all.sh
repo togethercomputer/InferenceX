@@ -11,7 +11,7 @@
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$HERE/config.env"
-source "$HERE/sglang_lib.sh"
+source "$HERE/bench_lib.sh"
 
 MODE="${1:-}"
 case "$MODE" in
@@ -23,7 +23,7 @@ step() { echo; echo "######## $* ########"; }
 
 # ---- gate-1: preflight (all modes) ----
 step "GATE-1 PREFLIGHT"
-bash "$HERE/run_sglang_0_preflight.sh"
+bash "$HERE/run_0_preflight.sh"
 
 if [[ "$MODE" == "--smoke" ]]; then
     trlog "smoke (gate-1) complete — environment looks good."
@@ -44,32 +44,32 @@ fi
 
 # ---- start container ----
 step "START CONTAINER"
-bash "$HERE/run_sglang_1_start_container.sh"
+bash "$HERE/run_1_start_container.sh"
 
 # ---- launch server (staged monitor inside) ----
 step "LAUNCH SERVER"
-bash "$HERE/run_sglang_2_launch_server.sh"
+bash "$HERE/run_2_launch_server.sh"
 
 # ---- gate-2: minimal real run (health + one completion) ----
 step "GATE-2 MINIMAL REAL RUN"
-bash "$HERE/run_sglang_3_test_client.sh"   # no BENCH -> health + chat only
+bash "$HERE/run_3_test_client.sh"   # no BENCH -> health + chat only
 
 # ---- full benchmark + emit result ----
 step "BENCHMARK"
-BENCH=1 bash "$HERE/run_sglang_3_test_client.sh"
+BENCH=1 bash "$HERE/run_3_test_client.sh"
 
 # ---- locate the just-written result ----
 DATE="$(date +%F)"
 TUNE=$([[ "$ENABLE_TUNING" == "1" ]] && echo tuned || echo untuned)
-RESULT="$HERE/results/$HW/$CLUSTER/$_TR_HOST/$DATE/${PROFILE}_${SEQ_TAG}_${TUNE}_conc${CONC}.json"
+RESULT="$HERE/results/$HW/$CLUSTER/$_TR_HOST/$DATE/${ENGINE}_${PROFILE}_${SEQ_TAG}_${TUNE}_conc${CONC}.json"
 
 # ---- baseline mode: install result as the committed baseline ----
 if [[ "$MODE" == "--baseline" ]]; then
     # hw-wide golden by default; BASELINE_CLUSTER=1 scopes under <hw>/<cluster>.
     if [[ "${BASELINE_CLUSTER:-0}" == "1" ]]; then
-        BDIR="$HERE/baselines/$HW/$CLUSTER/$PROFILE/$SEQ_TAG/$TUNE"
+        BDIR="$HERE/baselines/$HW/$CLUSTER/$ENGINE/$PROFILE/$SEQ_TAG/$TUNE"
     else
-        BDIR="$HERE/baselines/$HW/$PROFILE/$SEQ_TAG/$TUNE"
+        BDIR="$HERE/baselines/$HW/$ENGINE/$PROFILE/$SEQ_TAG/$TUNE"
     fi
     mkdir -p "$BDIR"
     cp "$RESULT" "$BDIR/conc${CONC}.json"

@@ -118,15 +118,19 @@ def _seqtag(isl, osl):
 
 
 def _baseline_candidates(baselines_dir, r):
-    # Tuning is part of the key (autotune alone moves throughput ~4-10%).
-    # Try cluster-specific golden first, then fall back to the hw-wide golden.
+    # Key dimensions: hw / framework / profile / seqtag / tuning / conc.
+    # framework keeps engines apart (sglang vs vllm); tuning keeps tuned/untuned
+    # apart (autotune alone moves throughput ~4-10%). Try cluster-specific golden
+    # first, then the hw-wide golden.
     tune = "tuned" if int(r.get("tuning", 0)) == 1 else "untuned"
     seq, leaf = _seqtag(r["isl"], r["osl"]), f"conc{r['conc']}.json"
+    fw = r.get("framework", "")
     cands = []
-    if r.get("cluster"):
-        cands.append(os.path.join(baselines_dir, r["hw"], r["cluster"],
+    if fw and r.get("cluster"):
+        cands.append(os.path.join(baselines_dir, r["hw"], r["cluster"], fw,
                                   r["profile"], seq, tune, leaf))
-    cands.append(os.path.join(baselines_dir, r["hw"], r["profile"], seq, tune, leaf))
+    if fw:
+        cands.append(os.path.join(baselines_dir, r["hw"], fw, r["profile"], seq, tune, leaf))
     return cands
 
 
@@ -223,19 +227,22 @@ def cmd_collect(a):
             ct = m.get("total_token_throughput")
             if bt and ct:
                 delta = (ct - bt) / bt * 100.0
-        rows.append((d.get("ts", ""), d.get("hw"), d.get("cluster", "?"), d.get("host", "?"),
+        rows.append((d.get("ts", ""), d.get("hw"), d.get("framework", "?"),
+                     d.get("cluster", "?"), d.get("host", "?"),
                      d.get("profile"), f'{d.get("isl")}/{d.get("osl")}',
                      "T" if d.get("tuning") else "U", d.get("conc"),
                      m.get("total_token_throughput"), m.get("median_tpot_ms"),
                      d.get("gpu", {}).get("tokens_per_kw"), delta))
-    rows.sort(key=lambda r: (r[1] or "", r[2] or "", r[3] or "", r[6], r[7] or 0, r[0]))
-    print(f"{'hw':<6}{'cluster':<10}{'host':<22}{'profile':<12}{'seq':>8}{'t':>2}"
+    # sort by hw, framework, cluster, host, tuning, conc, ts
+    rows.sort(key=lambda r: (r[1] or "", r[2] or "", r[3] or "", r[4] or "", r[7], r[8] or 0, r[0]))
+    print(f"{'hw':<6}{'fw':<7}{'cluster':<10}{'host':<20}{'profile':<12}{'seq':>8}{'t':>2}"
           f"{'conc':>6}{'tot_tok/s':>11}{'mTPOT':>8}{'tok/kW':>8}{'Δ%base':>9}")
     for r in rows:
-        d = f"{r[11]:+.1f}" if r[11] is not None else "-"
-        kw = f"{r[10]:.0f}" if r[10] else "-"
-        print(f"{(r[1] or '?'):<6}{(r[2] or '?'):<10}{(r[3] or '?'):<22}{(r[4] or '?'):<12}"
-              f"{r[5]:>8}{r[6]:>2}{(r[7] or 0):>6}{(r[8] or 0):>11.0f}{(r[9] or 0):>8.1f}{kw:>8}{d:>9}")
+        dl = f"{r[12]:+.1f}" if r[12] is not None else "-"
+        kw = f"{r[11]:.0f}" if r[11] else "-"
+        print(f"{(r[1] or '?'):<6}{(r[2] or '?'):<7}{(r[3] or '?'):<10}{(r[4] or '?'):<20}"
+              f"{(r[5] or '?'):<12}{r[6]:>8}{r[7]:>2}{(r[8] or 0):>6}"
+              f"{(r[9] or 0):>11.0f}{(r[10] or 0):>8.1f}{kw:>8}{dl:>9}")
     print(f"\n{len(rows)} result(s) under {a.results_dir}")
     return 0
 

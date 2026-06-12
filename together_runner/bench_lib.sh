@@ -46,7 +46,10 @@ declare -gA STAGE_ETA_BASELINE=(
     [graph-capture]=120
 )
 
-# Ordered startup plan — set by the launcher (run_sglang_2) so the monitor can
+# Server process pattern per engine (for pgrep/pkill of the inference server).
+server_proc_pat() { [[ "${ENGINE:-sglang}" == "vllm" ]] && echo "vllm serve" || echo "sglang.launch_server"; }
+
+# Ordered startup plan — set by the launcher (run_2) so the monitor can
 # announce the NEXT stage and a running "to ready" estimate. autotune is included
 # only when tuning is on. Leave empty to disable the look-ahead hints.
 STAGE_PLAN="${STAGE_PLAN:-}"
@@ -140,7 +143,19 @@ monitor_server_until_ready() {
     _LAST_DETAIL=""
     t_start=$(_now)
 
-    trlog "monitoring startup of '${container}' (log=${logpath}, timeout=$(_fmt_dur "$timeout"))"
+    # Engine-specific process pattern + log markers.
+    local proc_pat m_weight m_capture engine="${ENGINE:-sglang}"
+    if [[ "$engine" == "vllm" ]]; then
+        proc_pat="vllm serve"
+        m_weight="Loading model weights|Model loading took|Starting to load model"
+        m_capture="Capturing CUDA graph|Capturing cudagraph"
+    else
+        proc_pat="sglang.launch_server"
+        m_weight="Load weight begin"
+        m_capture="Capture cuda graph begin"
+    fi
+
+    trlog "monitoring startup of '${container}' (engine=${engine}, log=${logpath}, timeout=$(_fmt_dur "$timeout"))"
 
     while :; do
         # Ready?
@@ -150,8 +165,8 @@ monitor_server_until_ready() {
             return 0
         fi
         # Process dead?
-        if ! docker exec "$container" pgrep -f sglang.launch_server >/dev/null 2>&1; then
-            trerr "server process exited before becoming healthy. Last log lines:"
+        if ! docker exec "$container" pgrep -f "$proc_pat" >/dev/null 2>&1; then
+            trerr "server process ('$proc_pat') exited before becoming healthy. Last log lines:"
             docker exec "$container" bash -c "tr '\r' '\n' < '$logpath' 2>/dev/null | tail -n 40" >&2
             return 1
         fi
@@ -163,11 +178,12 @@ monitor_server_until_ready() {
         fi
 
         # Detect the furthest stage reached (order matters: latest wins).
+        # autotune is sglang-only.
         local newstage="$stage"
-        if   _log_has "$container" "$logpath" "Capture cuda graph begin"; then newstage="graph-capture"
-        elif _log_has "$container" "$logpath" "Tuning fp4_gemm|AutoTuner"; then newstage="autotune"
-        elif _log_has "$container" "$logpath" "Load weight begin";        then newstage="weight-load"
-        elif _log_has "$container" "$logpath" "."; then                       newstage="${newstage:-engine-init}"
+        if   _log_has "$container" "$logpath" "$m_capture"; then newstage="graph-capture"
+        elif [[ "$engine" != "vllm" ]] && _log_has "$container" "$logpath" "Tuning fp4_gemm|AutoTuner"; then newstage="autotune"
+        elif _log_has "$container" "$logpath" "$m_weight"; then newstage="weight-load"
+        elif _log_has "$container" "$logpath" "."; then        newstage="${newstage:-engine-init}"
         fi
 
         if [[ "$newstage" != "$stage" && -n "$newstage" ]]; then
@@ -178,12 +194,12 @@ monitor_server_until_ready() {
         # Per-stage progress detail — printed only when it changes (no spam).
         case "$stage" in
             weight-load)
-                local r; r=$(_rank_count "$container" "$logpath" "Load weight begin")
-                _emit_detail "weight-load: ${r}/${TP:-?} ranks started"
+                local r; r=$(_rank_count "$container" "$logpath" "$m_weight")
+                _emit_detail "weight-load: ${r} rank/worker load event(s) seen"
                 ;;
             graph-capture)
-                local r; r=$(_rank_count "$container" "$logpath" "Capture cuda graph begin")
-                _emit_detail "graph-capture: ${r}/${TP:-?} ranks capturing (cuda-graph-max-bs sweep)"
+                local r; r=$(_rank_count "$container" "$logpath" "$m_capture")
+                _emit_detail "graph-capture: ${r} capture event(s) (cudagraph sweep)"
                 ;;
             autotune)
                 # Surface the live tqdm percentage so progress is visible.
@@ -198,7 +214,7 @@ monitor_server_until_ready() {
 }
 
 # ---------------------------------------------------------------------------
-# Preflight assertion helpers (used by run_sglang_0_preflight.sh).
+# Preflight assertion helpers (used by run_0_preflight.sh).
 # Each prints a PASS/FAIL line and returns 0/1. Never exit — caller tallies.
 # ---------------------------------------------------------------------------
 _PF_FAILS=0

@@ -3,11 +3,11 @@
 # Surfaces "variable not set", wrong image, busy port, bad HF token, not-enough
 # GPUs/disk, etc. BEFORE any expensive launch. Exits non-zero on any FAIL.
 #
-#   bash run_sglang_0_preflight.sh
+#   bash run_0_preflight.sh
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$HERE/config.env"
-source "$HERE/sglang_lib.sh"
+source "$HERE/bench_lib.sh"
 
 echo "==================== PREFLIGHT (gate-1) ===================="
 echo "host=$_TR_HOST profile=$PROFILE model=$MODEL tp=$TP port=$PORT image=$IMAGE"
@@ -15,7 +15,7 @@ echo "------------------------------------------------------------"
 pf_reset
 
 # 1) Required env vars (recipe-dependent).
-req=(MODEL PROFILE TP PORT IMAGE CONTAINER_NAME HF_CACHE MODELS_ROOT)
+req=(ENGINE MODEL PROFILE TP PORT IMAGE CONTAINER_NAME HF_CACHE MODELS_ROOT)
 [[ "$PROFILE" == "dsr1-fp4" ]] && req+=(EP_SIZE)
 if check_env_vars "${req[@]}" 2>/dev/null; then
     pf_pass "required env vars set: ${req[*]}"
@@ -82,8 +82,9 @@ elif [[ -d "$HF_CACHE" ]] && find "$HF_CACHE" -maxdepth 4 -type d -name "models-
     pf_info "HF cache populated at $HF_CACHE (may avoid re-download)"
 else pf_info "weights NOT pre-staged — first run will download (slow); see prestage_weights.sh"; fi
 
-# 10) tuning switch echo.
-if [[ "$ENABLE_TUNING" == "1" ]]; then pf_info "ENABLE_TUNING=1 — autotune KEPT (use for baselines; slow cold start)"
+# 10) tuning switch echo (sglang only; vLLM has no separable fp4 autotune).
+if [[ "$ENGINE" == "vllm" ]]; then pf_info "ENGINE=vllm — ENABLE_TUNING is a baseline-key label only (no vLLM flag effect)"
+elif [[ "$ENABLE_TUNING" == "1" ]]; then pf_info "ENABLE_TUNING=1 — autotune KEPT (use for baselines; slow cold start)"
 else pf_info "ENABLE_TUNING=0 — autotune SKIPPED via --disable-flashinfer-autotune (fast)"; fi
 
 echo "------------------------------------------------------------"

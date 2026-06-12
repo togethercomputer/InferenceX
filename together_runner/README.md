@@ -1,6 +1,6 @@
 # together_runner
 
-Single-node (this 8×B200) SGLang benchmark harness for InferenceX: fast
+Single-node (this 8×B200) multi-engine (SGLang + vLLM) benchmark harness for InferenceX: fast
 **smoke** preflight, **externalized weight staging**, **staged startup
 monitoring with ETA**, and **baseline/delta** comparison across machines.
 
@@ -21,9 +21,9 @@ run_sglang_3_test_client.sh # health + chat + bench, emits result JSON
 run_all.sh            # ③ one-click: --smoke | --full | --baseline
 record_baselines.sh   # sweep CONC_LIST against one warm server, save baselines
 compare.py            # ④ emit result schema / delta vs baseline / collect fleet
-baselines/<hw>/<profile>/<seqtag>/<tuned|untuned>/conc<N>.json          # committed golden
-          (optional per-cluster override: baselines/<hw>/<cluster>/<profile>/...)
-results/<hw>/<cluster>/<host>/<date>/<profile>_<seqtag>_<tuned|untuned>_conc<N>.json  # gitignored
+baselines/<hw>/<framework>/<profile>/<seqtag>/<tuned|untuned>/conc<N>.json   # committed golden
+          (optional per-cluster override: baselines/<hw>/<cluster>/<framework>/...)
+results/<hw>/<cluster>/<host>/<date>/<engine>_<profile>_<seqtag>_<tuned|untuned>_conc<N>.json  # gitignored
 ```
 
 Directory scheme scales across **hw × cluster × host × date × recipe × conc**.
@@ -40,6 +40,9 @@ hf auth login            # or: export HF_TOKEN=hf_xxx
 
 # Smoke (seconds) — catches unset vars, wrong image, busy port, bad token, low disk:
 bash run_all.sh --smoke
+
+# Engine/profile is selected via ENGINE+PROFILE (default sglang/dsr1-fp4):
+ENGINE=vllm PROFILE=gptoss-fp4 bash run_all.sh --full      # vLLM, gpt-oss-120b FP4
 
 # Full run (preflight -> prestage -> start -> launch+monitor -> gate-2 -> bench -> compare):
 bash run_all.sh --full
@@ -94,9 +97,9 @@ median/p99 TTFT, median/p99 TPOT, median ITL, median/p99 E2E latency, and
 tokens/MW). Result JSON keys mirror `../utils/process_result.py` so
 `collect_results.py` / `summarize.py` can aggregate across machines.
 
-Compare key = `(hw, profile, seqtag, tuning, conc)`. `compare.py compare` looks up
-the baseline cluster-first then hw-wide:
-`baselines/<hw>/<cluster>/...` → `baselines/<hw>/<profile>/<seqtag>/<tuned|untuned>/conc<N>.json`.
+Compare key = `(hw, framework, profile, seqtag, tuning, conc)`. `compare.py compare`
+looks up the baseline cluster-first then hw-wide:
+`baselines/<hw>/<cluster>/<framework>/...` → `baselines/<hw>/<framework>/<profile>/<seqtag>/<tuned|untuned>/conc<N>.json`.
 Tuning is part of the key so tuned runs compare to tuned baselines (autotune alone
 shifts throughput ~4–10%); keep `ENABLE_TUNING` consistent between reference and test.
 
