@@ -25,6 +25,7 @@ ENGINE=vllm PROFILE=gptoss-fp4 bash run_all.sh --full
 # sweep concurrencies into baselines (one warm server):
 ENGINE=vllm PROFILE=gptoss-fp4 CONC_LIST="16 64 128" bash record_baselines.sh
 python3 compare.py collect        # fleet table (+Δ vs baseline), framework column
+python3 compare.py table --write-readme   # refresh the Baseline results table in README.md
 ```
 All config in `config.env` (sourced everywhere; override by exporting first).
 Each step also runs standalone (`bash run_2_launch_server.sh`).

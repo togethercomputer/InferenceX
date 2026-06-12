@@ -247,6 +247,50 @@ def cmd_collect(a):
     return 0
 
 
+# --------------------------- table (markdown for README) -------------------
+def cmd_table(a):
+    """Emit a Markdown table of committed baselines (for pasting into README)."""
+    groups = {}
+    for _, d in _iter_results(a.baselines_dir):
+        key = (d["hw"], d.get("framework", "?"), d["profile"],
+               _seqtag(d["isl"], d["osl"]), "tuned" if d.get("tuning") else "untuned")
+        groups.setdefault(key, []).append(d)
+    out = []
+    for key in sorted(groups):
+        hw, fw, profile, seq, tune = key
+        rows = sorted(groups[key], key=lambda x: x["conc"])
+        model = rows[0].get("model", "")
+        tp = rows[0].get("tp", "?")
+        out.append(f"**{fw} · {profile}** ({model}) — {hw}, {seq}, TP{tp}, {tune}")
+        out.append("")
+        out.append("| conc | total tok/s | output tok/s | median TPOT (ms) | median TTFT (ms) | tok/kW |")
+        out.append("|---:|---:|---:|---:|---:|---:|")
+        for d in rows:
+            m, g = d.get("metrics", {}), d.get("gpu", {})
+            kw = g.get("tokens_per_kw")
+            kw_s = f"{kw:,.0f}" if kw else "-"
+            out.append(f"| {d['conc']} | {m.get('total_token_throughput', 0):,.0f} | "
+                       f"{m.get('output_token_throughput', 0):,.0f} | {m.get('median_tpot_ms', 0):.1f} | "
+                       f"{m.get('median_ttft_ms', 0):.0f} | {kw_s} |")
+        out.append("")
+    md = "\n".join(out).rstrip()
+    if a.write_readme:
+        # Splice between the markers in README.md.
+        readme = os.path.join(os.path.dirname(__file__), "README.md")
+        beg, end = "<!-- BEGIN baselines (compare.py table) -->", "<!-- END baselines -->"
+        txt = open(readme).read()
+        if beg in txt and end in txt:
+            pre, rest = txt.split(beg, 1)
+            _, post = rest.split(end, 1)
+            open(readme, "w").write(f"{pre}{beg}\n{md}\n{end}{post}")
+            print(f"README.md baselines section updated ({readme})")
+        else:
+            print("markers not found in README.md; printing instead:\n" + md)
+    else:
+        print(md)
+    return 0
+
+
 # --------------------------- argparse --------------------------------------
 def main():
     p = argparse.ArgumentParser(description="together_runner result tooling")
@@ -275,6 +319,12 @@ def main():
     co.add_argument("--baselines-dir", default=os.path.join(os.path.dirname(__file__), "baselines"))
     co.add_argument("--hw", default="", help="filter by hardware tag")
     co.set_defaults(func=cmd_collect)
+
+    t = sub.add_parser("table", help="Markdown table of committed baselines (for README)")
+    t.add_argument("--baselines-dir", default=os.path.join(os.path.dirname(__file__), "baselines"))
+    t.add_argument("--write-readme", action="store_true",
+                   help="splice the table into README.md between the baselines markers")
+    t.set_defaults(func=cmd_table)
 
     a = p.parse_args()
     sys.exit(a.func(a) or 0)

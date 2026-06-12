@@ -103,10 +103,37 @@ looks up the baseline cluster-first then hw-wide:
 Tuning is part of the key so tuned runs compare to tuned baselines (autotune alone
 shifts throughput ~4–10%); keep `ENABLE_TUNING` consistent between reference and test.
 
-## Startup stages & ETA (this node, DSR1-FP4 cold start)
+## Baseline results (this node, `gpu-dp-96sjj-gkwph`)
 
-`sglang_lib.sh` maps server-log markers to named stages and prints elapsed + a
-baseline ETA per stage:
+Golden numbers measured here with the unified client. Regenerate this section with
+`python3 compare.py table` after recording/updating baselines.
+
+<!-- BEGIN baselines (compare.py table) -->
+**sglang · dsr1-fp4** (nvidia/DeepSeek-R1-0528-FP4) — b200, 1k1k, TP8, tuned
+
+| conc | total tok/s | output tok/s | median TPOT (ms) | median TTFT (ms) | tok/kW |
+|---:|---:|---:|---:|---:|---:|
+| 16 | 2,288 | 1,122 | 12.9 | 359 | 326 |
+| 64 | 5,684 | 2,704 | 21.3 | 503 | 680 |
+| 128 | 9,672 | 4,789 | 24.5 | 525 | 1,047 |
+| 256 | 14,749 | 7,197 | 33.0 | 607 | 1,587 |
+
+**vllm · gptoss-fp4** (openai/gpt-oss-120b) — b200, 1k1k, TP4, untuned
+
+| conc | total tok/s | output tok/s | median TPOT (ms) | median TTFT (ms) | tok/kW |
+|---:|---:|---:|---:|---:|---:|
+| 16 | 13,952 | 3,416 | 3.7 | 26 | 1,503 |
+| 64 | 37,333 | 8,296 | 6.2 | 41 | 3,273 |
+| 128 | 49,232 | 13,227 | 8.1 | 102 | 4,942 |
+<!-- END baselines -->
+
+> sglang dsr1-fp4 and vllm gpt-oss-120b are **different models** — not a head-to-head;
+> gpt-oss-120b is far lighter than DSR1's MoE, hence the much higher throughput.
+
+## Startup stages & ETA
+
+`bench_lib.sh` maps server-log markers (engine-aware) to named stages and prints
+elapsed + a baseline ETA per stage:
 
 | stage | marker | ~baseline | notes |
 |---|---|---|---|
