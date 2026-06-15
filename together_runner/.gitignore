@@ -1,0 +1,6 @@
+# Per-run benchmark outputs are machine/day specific — keep them out of git.
+# Golden baselines under baselines/ ARE committed.
+results/
+*.log
+gpu_metrics*.csv
+__pycache__/

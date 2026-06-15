@@ -1,0 +1,37 @@
+{
+  "hw": "b200",
+  "cluster": "together",
+  "model": "nvidia/DeepSeek-R1-0528-FP4",
+  "framework": "sglang",
+  "precision": "fp4",
+  "isl": 1024,
+  "osl": 1024,
+  "tp": 8,
+  "ep": 8,
+  "conc": 16,
+  "profile": "dsr1-fp4",
+  "image": "lmsysorg/sglang:dev-cu13",
+  "tuning": 1,
+  "host": "gpu-dp-96sjj-gkwph",
+  "ts": "2026-06-12T00:51:16+00:00",
+  "metrics": {
+    "successful_requests": 160,
+    "total_token_throughput": 2287.867137633622,
+    "output_token_throughput": 1121.5270840361031,
+    "request_throughput": 2.237851164115637,
+    "median_ttft_ms": 358.53034793399274,
+    "p99_ttft_ms": 547.9667304037138,
+    "median_tpot_ms": 12.939227812051035,
+    "p99_tpot_ms": 15.586002110603626,
+    "median_itl_ms": 96.50970296934247,
+    "median_e2el_ms": 6761.7408249061555,
+    "p99_e2el_ms": 13747.231411556711
+  },
+  "gpu": {
+    "n_gpus": 8,
+    "mean_power_per_gpu_w": 429.7,
+    "total_avg_power_w": 3437.5,
+    "peak_power_per_gpu_w": 626.4,
+    "tokens_per_kw": 326.3
+  }
+}

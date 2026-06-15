@@ -1,0 +1,37 @@
+{
+  "hw": "b200",
+  "cluster": "together",
+  "model": "openai/gpt-oss-120b",
+  "framework": "vllm",
+  "precision": "fp4",
+  "isl": 1024,
+  "osl": 1024,
+  "tp": 4,
+  "ep": 0,
+  "conc": 64,
+  "profile": "gptoss-fp4",
+  "image": "vllm/vllm-openai:v0.22.0",
+  "tuning": 0,
+  "host": "gpu-dp-96sjj-gkwph",
+  "ts": "2026-06-12T00:31:52+00:00",
+  "metrics": {
+    "successful_requests": 638,
+    "total_token_throughput": 37332.66997349921,
+    "output_token_throughput": 8295.8456111249,
+    "request_throughput": 56.17377760687837,
+    "median_ttft_ms": 41.31946759298444,
+    "p99_ttft_ms": 362.18235563486814,
+    "median_tpot_ms": 6.199484860757735,
+    "p99_tpot_ms": 17.411088001575656,
+    "median_itl_ms": 4.402743652462959,
+    "median_e2el_ms": 197.25483958609402,
+    "p99_e2el_ms": 6466.04463822674
+  },
+  "gpu": {
+    "n_gpus": 8,
+    "mean_power_per_gpu_w": 316.8,
+    "total_avg_power_w": 2534.4,
+    "peak_power_per_gpu_w": 653.7,
+    "tokens_per_kw": 3273.3
+  }
+}

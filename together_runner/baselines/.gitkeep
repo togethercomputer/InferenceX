@@ -1,0 +1,3 @@
+# Golden baseline results live here, committed to the repo.
+# Layout: baselines/<hw>/<model>/<isl_osl>/conc<N>.json
+# Recorded on the reference machine with ENABLE_TUNING=1. See compare.py.
