@@ -75,3 +75,66 @@ A candidate to revisit when scaling prefill (NP1D) or tuning chunked-prefill sch
 Nodes slinky-0/1; sweep run as overlap step on prefill job 61 (decode job 62), router :8002.
 Server logs: `/data/home/johnson/enroot/{prefill-cg,decode-cg,router-sweep}.log`. Sweep
 driver log: `/data/home/johnson/enroot/sweep.log`.
+
+---
+
+## 2026-07-09 re-benchmark (newer stack) — +79% peak throughput, conc-128 anomaly gone
+
+Re-ran the identical harness (`00_setup -> 01_preflight -> 10_launch -> 20_benchmark`) on the
+same 2 nodes, same 1P1D/TP8 topology, same client + ISL/OSL 1024/1024, same sweep
+`CONC_LIST="16 64 128 256"`. **Config and serving args unchanged** — only the platform underneath
+moved (rolling `dev-cu13` image + GPU driver). **0 failed requests across all points.**
+
+### Environment deltas (config was identical; only the stack changed)
+| | 06-29 / 06-30 record | 2026-07-09 |
+|---|---|---|
+| GPU driver | 580 | **610.43.02** |
+| sglang | `0.0.0.dev1+g909123ddb` | `0.0.0.dev1+g0ffed946f` |
+| sgl-router | 0.3.2 | 0.3.2 (same) |
+| torch / cuda | — | 2.11.0+cu130 / cuda 13.0 |
+| attention backend | (unstated) | **`trtllm_mha`** |
+| KV path | dmabuf (`WITH_NVIDIA_PEERMEM=0`) | dmabuf (same, auto-decided) |
+| IB devices (auto) | `mlx5_9,10,11,12,4,5,6,7` | `mlx5_11,12,5,6,2,3,0,1` (re-detected) |
+| image sqsh md5 | — | `3cdb6e0a9dec073c4a30b374ca5f8a02` (23.7 GB) |
+
+### Results (1k/1k, CUDA graph, 07-09)
+| conc | requests | total tok/s | output tok/s | med TPOT (ms) | med TTFT (ms) | p99 TTFT (ms) | med E2E (ms) |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 16  | 160/160   | 2,482 | 1,133 | 12.1 | 335   | 5,261  | 12,703 |
+| 64  | 512/512   | 6,070 | 2,807 | 19.5 | 959   | 14,595 | 20,571 |
+| 128 | 1024/1024 | 7,786 | 3,594 | 30.9 | 1,758 | 28,405 | 33,001 |
+| 256 | 2048/2048 | 8,755 | 4,018 | 48.9 | 5,214 | 58,008 | 56,243 |
+
+### Comparison — total tok/s vs the prior record
+| conc | 06-29 | 06-30 | **07-09** | Δ vs 06-30 |
+|---:|---:|---:|---:|---:|
+| 16  | 2,087 | 2,156 | **2,482** | +15% |
+| 64  | 4,591 | 4,614 | **6,070** | +32% |
+| 128 | 4,512 | 3,298 | **7,786** | +136% |
+| 256 | 4,898 | 4,892 | **8,755** | +79% |
+
+### Findings
+1. **Peak total throughput 4,900 -> 8,755 tok/s (+79%)**, ~306 -> ~547 tok/s/GPU over the 16 GPUs.
+2. **Curve now scales past conc 64.** The prior record's "saturates at conc >= 64" no longer holds
+   for this stack — throughput rises monotonically 16 -> 256. The single-prefill bottleneck is still
+   visible in the TTFT tail (p99 5.3s -> 58s) but no longer caps total throughput in this range.
+3. **conc-128 anomaly resolved.** 06-30 reproducibly dipped to ~3.3k (below conc 64); 07-09 gives
+   7,786 on a clean curve. Since only the stack changed (same scripts / CPU alloc / IB / args), this
+   points at the dip being a **software interleaving artifact** in the older sglang build rather than
+   the CPU-per-step cap hypothesized in `INVESTIGATE-conc128.md` — worth re-reading that doc against
+   `g0ffed946f`.
+4. **TTFT dramatically lower** at every level (median TTFT down 70-80%). Only regression: TPOT at
+   conc 256 slightly worse (42 -> 49 ms) — a fair trade for +79% throughput.
+
+### Caveat on rigor
+`dev-cu13` is a rolling tag and the driver moved (580 -> 610), so this is "same recipe, newer
+platform," not a controlled A/B. The gain is real and large but not attributable to a single cause
+without pinning the image digest (md5 recorded above for this run).
+
+### Provenance (07-09)
+Nodes slinky-0/1, allocation 29; prefill@slinky-0(:9000 bootstrap), decode@slinky-1, router
+`http://10.245.232.13:8002`. Raw per-point JSON `$HOME/enroot/sweep/qwen3-32b_1k1k_conc{16,64,128,256}.bench.json`
++ sweep driver log `$HOME/enroot/sweep.log`; server logs `$HOME/enroot/{prefill,decode,router}.log`.
+These per-run outputs stay machine-local by repo convention (`together_runner/.gitignore`: `results/`, `*.log`);
+the tables above are the committed record. Image sqsh md5 `3cdb6e0a9dec073c4a30b374ca5f8a02`.
+mooncake version not pip-visible in this image (unresolved).
