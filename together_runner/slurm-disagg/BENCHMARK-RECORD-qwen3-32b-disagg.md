@@ -138,3 +138,52 @@ Nodes slinky-0/1, allocation 29; prefill@slinky-0(:9000 bootstrap), decode@slink
 These per-run outputs stay machine-local by repo convention (`together_runner/.gitignore`: `results/`, `*.log`);
 the tables above are the committed record. Image sqsh md5 `3cdb6e0a9dec073c4a30b374ca5f8a02`.
 mooncake version not pip-visible in this image (unresolved).
+
+---
+
+## 2026-07-15 re-benchmark (latest stack) + same-day old-stack control — conc-128 dip was transient
+
+The pod was rebuilt after 07-09 and the GPU driver came back as **580.159.04** (the 06-30-era
+driver, not 07-09's 610.43.02). That made a same-day A/B possible on identical hardware/driver:
+
+- **Run A (control)**: the cached June-29 image (sqsh md5 `a41b4a67b6312f8d517e5e16418add03`) —
+  the same image the 06-29/06-30 record ran on.
+- **Run B (latest stack)**: fresh `dev-cu13` pull (sqsh md5 `9aa01f04e1ad6c223d71cfce29fa259c`,
+  23.8 GB) — note this differs from 07-09's `3cdb6e0a...` too; the rolling tag moved again.
+
+Identical harness, config, args, nodes (slinky-0/1), 1P1D/TP8, 1k1k, `CONC_LIST="16 64 128 256"`.
+Decode-side CUDA graph ON in both (verified in server_args). **0 failed requests in both runs.**
+
+### Run B results (latest stack, 1k/1k, 07-15)
+| conc | requests | total tok/s | output tok/s | med TPOT (ms) | med TTFT (ms) | p99 TTFT (ms) | med E2E (ms) |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 16  | 160/160   | 2,321 | 1,050 | 13.0 | 456    | 6,095  | 13,648 |
+| 64  | 512/512   | 5,478 | 2,534 | 21.2 | 1,308  | 17,919 | 22,724 |
+| 128 | 1024/1024 | 6,760 | 3,126 | 34.4 | 2,770  | 35,000 | 37,369 |
+| 256 | 2048/2048 | 7,381 | 3,382 | 49.1 | 15,507 | 73,821 | 65,613 |
+
+### Comparison — total tok/s across all recorded runs
+| conc | 06-30 (old img, drv580) | 07-09 (img 3cdb, drv610) | 07-15 A (old img, drv580) | **07-15 B (new img, drv580)** |
+|---:|---:|---:|---:|---:|
+| 16  | 2,156 | 2,482 | 1,869 | **2,321** |
+| 64  | 4,614 | 6,070 | 4,626 | **5,478** |
+| 128 | 3,298 | 7,786 | 6,050 | **6,760** |
+| 256 | 4,892 | 8,755 | 5,236 | **7,381** |
+
+### Findings
+1. **The software-stack gain is confirmed by a controlled same-day A/B**: on identical
+   hardware/driver, the new image beats the old one at every point (+12% to +41%), and only the
+   new stack keeps scaling past conc 64 (old stack flattens ~5k, new reaches 7,381 at conc 256).
+2. **The conc-128 dip reproduced in NEITHER run — including the old image it was first seen on**
+   (06-30: 3,298; 07-15 same image: 6,050). This revises the 07-09 finding: the dip was a
+   **transient/environmental artifact of the 06-30 session**, not a property of the old sglang
+   build (and not the CPU-per-step cap either — `INVESTIGATE-conc128.md` can be closed out).
+3. **Platform still matters**: Run B trails the 07-09 record by 6–16% at every point on the same
+   recipe. Two confounders moved together (driver 610 → 580, image `3cdb` → `9aa0`), so the gap
+   is not attributable to either alone — but it bounds the driver+image effect at O(10%).
+
+### Provenance (07-15)
+Allocations 128 (Run A) / 129 (Run B), prefill@slinky-0, decode@slinky-1, router :8002.
+Archives (machine-local): `$HOME/enroot/sweep_runA_0715/` and `$HOME/enroot/sweep_runB_0715/`
+(4 bench JSONs + prefill/decode/router/sweep logs each), driver logs `$HOME/enroot/run{A,B}_0715.log`.
+Old image retained as `$HOME/enroot/sglang-dev-cu13.sqsh.jun29`.
