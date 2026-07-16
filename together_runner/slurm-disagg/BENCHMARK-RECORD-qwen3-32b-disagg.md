@@ -75,3 +75,115 @@ A candidate to revisit when scaling prefill (NP1D) or tuning chunked-prefill sch
 Nodes slinky-0/1; sweep run as overlap step on prefill job 61 (decode job 62), router :8002.
 Server logs: `/data/home/johnson/enroot/{prefill-cg,decode-cg,router-sweep}.log`. Sweep
 driver log: `/data/home/johnson/enroot/sweep.log`.
+
+---
+
+## 2026-07-09 re-benchmark (newer stack) — +79% peak throughput, conc-128 anomaly gone
+
+Re-ran the identical harness (`00_setup -> 01_preflight -> 10_launch -> 20_benchmark`) on the
+same 2 nodes, same 1P1D/TP8 topology, same client + ISL/OSL 1024/1024, same sweep
+`CONC_LIST="16 64 128 256"`. **Config and serving args unchanged** — only the platform underneath
+moved (rolling `dev-cu13` image + GPU driver). **0 failed requests across all points.**
+
+### Environment deltas (config was identical; only the stack changed)
+| | 06-29 / 06-30 record | 2026-07-09 |
+|---|---|---|
+| GPU driver | 580 | **610.43.02** |
+| sglang | `0.0.0.dev1+g909123ddb` | `0.0.0.dev1+g0ffed946f` |
+| sgl-router | 0.3.2 | 0.3.2 (same) |
+| torch / cuda | — | 2.11.0+cu130 / cuda 13.0 |
+| attention backend | (unstated) | **`trtllm_mha`** |
+| KV path | dmabuf (`WITH_NVIDIA_PEERMEM=0`) | dmabuf (same, auto-decided) |
+| IB devices (auto) | `mlx5_9,10,11,12,4,5,6,7` | `mlx5_11,12,5,6,2,3,0,1` (re-detected) |
+| image sqsh md5 | — | `3cdb6e0a9dec073c4a30b374ca5f8a02` (23.7 GB) |
+
+### Results (1k/1k, CUDA graph, 07-09)
+| conc | requests | total tok/s | output tok/s | med TPOT (ms) | med TTFT (ms) | p99 TTFT (ms) | med E2E (ms) |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 16  | 160/160   | 2,482 | 1,133 | 12.1 | 335   | 5,261  | 12,703 |
+| 64  | 512/512   | 6,070 | 2,807 | 19.5 | 959   | 14,595 | 20,571 |
+| 128 | 1024/1024 | 7,786 | 3,594 | 30.9 | 1,758 | 28,405 | 33,001 |
+| 256 | 2048/2048 | 8,755 | 4,018 | 48.9 | 5,214 | 58,008 | 56,243 |
+
+### Comparison — total tok/s vs the prior record
+| conc | 06-29 | 06-30 | **07-09** | Δ vs 06-30 |
+|---:|---:|---:|---:|---:|
+| 16  | 2,087 | 2,156 | **2,482** | +15% |
+| 64  | 4,591 | 4,614 | **6,070** | +32% |
+| 128 | 4,512 | 3,298 | **7,786** | +136% |
+| 256 | 4,898 | 4,892 | **8,755** | +79% |
+
+### Findings
+1. **Peak total throughput 4,900 -> 8,755 tok/s (+79%)**, ~306 -> ~547 tok/s/GPU over the 16 GPUs.
+2. **Curve now scales past conc 64.** The prior record's "saturates at conc >= 64" no longer holds
+   for this stack — throughput rises monotonically 16 -> 256. The single-prefill bottleneck is still
+   visible in the TTFT tail (p99 5.3s -> 58s) but no longer caps total throughput in this range.
+3. **conc-128 anomaly resolved.** 06-30 reproducibly dipped to ~3.3k (below conc 64); 07-09 gives
+   7,786 on a clean curve. Since only the stack changed (same scripts / CPU alloc / IB / args), this
+   points at the dip being a **software interleaving artifact** in the older sglang build rather than
+   the CPU-per-step cap hypothesized in `INVESTIGATE-conc128.md` — worth re-reading that doc against
+   `g0ffed946f`.
+4. **TTFT dramatically lower** at every level (median TTFT down 70-80%). Only regression: TPOT at
+   conc 256 slightly worse (42 -> 49 ms) — a fair trade for +79% throughput.
+
+### Caveat on rigor
+`dev-cu13` is a rolling tag and the driver moved (580 -> 610), so this is "same recipe, newer
+platform," not a controlled A/B. The gain is real and large but not attributable to a single cause
+without pinning the image digest (md5 recorded above for this run).
+
+### Provenance (07-09)
+Nodes slinky-0/1, allocation 29; prefill@slinky-0(:9000 bootstrap), decode@slinky-1, router
+`http://10.245.232.13:8002`. Raw per-point JSON `$HOME/enroot/sweep/qwen3-32b_1k1k_conc{16,64,128,256}.bench.json`
++ sweep driver log `$HOME/enroot/sweep.log`; server logs `$HOME/enroot/{prefill,decode,router}.log`.
+These per-run outputs stay machine-local by repo convention (`together_runner/.gitignore`: `results/`, `*.log`);
+the tables above are the committed record. Image sqsh md5 `3cdb6e0a9dec073c4a30b374ca5f8a02`.
+mooncake version not pip-visible in this image (unresolved).
+
+---
+
+## 2026-07-15 re-benchmark (latest stack) + same-day old-stack control — conc-128 dip was transient
+
+The pod was rebuilt after 07-09 and the GPU driver came back as **580.159.04** (the 06-30-era
+driver, not 07-09's 610.43.02). That made a same-day A/B possible on identical hardware/driver:
+
+- **Run A (control)**: the cached June-29 image (sqsh md5 `a41b4a67b6312f8d517e5e16418add03`) —
+  the same image the 06-29/06-30 record ran on.
+- **Run B (latest stack)**: fresh `dev-cu13` pull (sqsh md5 `9aa01f04e1ad6c223d71cfce29fa259c`,
+  23.8 GB) — note this differs from 07-09's `3cdb6e0a...` too; the rolling tag moved again.
+
+Identical harness, config, args, nodes (slinky-0/1), 1P1D/TP8, 1k1k, `CONC_LIST="16 64 128 256"`.
+Decode-side CUDA graph ON in both (verified in server_args). **0 failed requests in both runs.**
+
+### Run B results (latest stack, 1k/1k, 07-15)
+| conc | requests | total tok/s | output tok/s | med TPOT (ms) | med TTFT (ms) | p99 TTFT (ms) | med E2E (ms) |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 16  | 160/160   | 2,321 | 1,050 | 13.0 | 456    | 6,095  | 13,648 |
+| 64  | 512/512   | 5,478 | 2,534 | 21.2 | 1,308  | 17,919 | 22,724 |
+| 128 | 1024/1024 | 6,760 | 3,126 | 34.4 | 2,770  | 35,000 | 37,369 |
+| 256 | 2048/2048 | 7,381 | 3,382 | 49.1 | 15,507 | 73,821 | 65,613 |
+
+### Comparison — total tok/s across all recorded runs
+| conc | 06-30 (old img, drv580) | 07-09 (img 3cdb, drv610) | 07-15 A (old img, drv580) | **07-15 B (new img, drv580)** |
+|---:|---:|---:|---:|---:|
+| 16  | 2,156 | 2,482 | 1,869 | **2,321** |
+| 64  | 4,614 | 6,070 | 4,626 | **5,478** |
+| 128 | 3,298 | 7,786 | 6,050 | **6,760** |
+| 256 | 4,892 | 8,755 | 5,236 | **7,381** |
+
+### Findings
+1. **The software-stack gain is confirmed by a controlled same-day A/B**: on identical
+   hardware/driver, the new image beats the old one at every point (+12% to +41%), and only the
+   new stack keeps scaling past conc 64 (old stack flattens ~5k, new reaches 7,381 at conc 256).
+2. **The conc-128 dip reproduced in NEITHER run — including the old image it was first seen on**
+   (06-30: 3,298; 07-15 same image: 6,050). This revises the 07-09 finding: the dip was a
+   **transient/environmental artifact of the 06-30 session**, not a property of the old sglang
+   build (and not the CPU-per-step cap either — `INVESTIGATE-conc128.md` can be closed out).
+3. **Platform still matters**: Run B trails the 07-09 record by 6–16% at every point on the same
+   recipe. Two confounders moved together (driver 610 → 580, image `3cdb` → `9aa0`), so the gap
+   is not attributable to either alone — but it bounds the driver+image effect at O(10%).
+
+### Provenance (07-15)
+Allocations 128 (Run A) / 129 (Run B), prefill@slinky-0, decode@slinky-1, router :8002.
+Archives (machine-local): `$HOME/enroot/sweep_runA_0715/` and `$HOME/enroot/sweep_runB_0715/`
+(4 bench JSONs + prefill/decode/router/sweep logs each), driver logs `$HOME/enroot/run{A,B}_0715.log`.
+Old image retained as `$HOME/enroot/sglang-dev-cu13.sqsh.jun29`.
