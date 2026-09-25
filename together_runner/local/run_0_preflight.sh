@@ -7,7 +7,10 @@
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$HERE/config.env"
-source "$HERE/bench_lib.sh"
+TR_LIB="$(cd "$HERE/../lib" && pwd)"
+source "$TR_LIB/common.sh"
+source "$TR_LIB/vendor.sh"
+source "$TR_LIB/monitor.sh"
 
 echo "==================== PREFLIGHT (gate-1) ===================="
 echo "host=$_TR_HOST profile=$PROFILE model=$MODEL tp=$TP port=$PORT image=$IMAGE"
@@ -33,14 +36,14 @@ if docker image inspect "$IMAGE" >/dev/null 2>&1; then pf_pass "image present lo
 else pf_fail "image NOT present locally: $IMAGE  (docker pull \"$IMAGE\")"; fi
 
 # 4) GPU count >= TP.
-gpu_n=$(nvidia-smi -L 2>/dev/null | grep -c '^GPU' || echo 0)
+gpu_n=$(vendor_gpu_count)
 if (( gpu_n >= TP )); then pf_pass "GPUs available: $gpu_n >= TP=$TP"
 else pf_fail "only $gpu_n GPUs visible, need TP=$TP"; fi
 
 # 5) Free GPU memory (warn if other jobs are resident — shared node).
-busy=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits 2>/dev/null | awk '$1>2000{c++} END{print c+0}')
+busy=$(vendor_gpu_busy_count 2048)
 if (( busy == 0 )); then pf_pass "all GPUs idle (<2GB used)"
-else pf_info "$busy GPU(s) already have >2GB resident — shared node, check nvidia-smi"; fi
+else pf_info "$busy GPU(s) already have >2GB resident — shared node, check $(vendor_smi)"; fi
 
 # 6) Port free on host — OR held by our own container's docker-proxy (expected
 #    when reusing the container; `docker run -p` binds the host port for the
@@ -59,9 +62,17 @@ if [[ "$MODEL" == /* ]]; then
 elif [[ -z "${HF_TOKEN:-}" ]]; then
     pf_info "HF_TOKEN empty — OK for public models; gated models will fail"
 else
-    if command -v hf >/dev/null 2>&1; then who=$(hf auth whoami 2>/dev/null)
-    else who=$(docker run --rm -e HF_TOKEN="$HF_TOKEN" "$IMAGE" hf auth whoami 2>/dev/null); fi
-    who=$(echo "$who" | grep -v '^\s*$' | head -1 | tr -d '\r')
+    if command -v hf >/dev/null 2>&1; then
+        who=$(hf auth whoami 2>/dev/null)
+    else
+        # --entrypoint bash: engine images ENTRYPOINT to `vllm`/`sglang`, so a
+        # bare `docker run $IMAGE hf auth whoami` feeds the args to the engine
+        # and returns its startup logs instead of a username.
+        who=$(docker run --rm --entrypoint bash -e HF_TOKEN="$HF_TOKEN" "$IMAGE" \
+                -lc 'hf auth whoami 2>/dev/null' 2>/dev/null)
+    fi
+    # Drop blank lines and any library log chatter the image emits on import.
+    who=$(echo "$who" | tr -d '\r' | grep -vE '^\s*$|INFO|WARNING|ERROR|\[importing' | head -1)
     if [[ -n "$who" ]]; then pf_pass "HF token valid (user: $who)"
     else pf_pass "HF token present (whoami returned no name; download will confirm access)"; fi
 fi

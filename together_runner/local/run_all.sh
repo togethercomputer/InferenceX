@@ -11,7 +11,11 @@
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$HERE/config.env"
-source "$HERE/bench_lib.sh"
+TR_LIB="$(cd "$HERE/../lib" && pwd)"
+TR_ANALYSIS="$(cd "$HERE/../analysis" && pwd)"
+source "$TR_LIB/common.sh"
+source "$TR_LIB/vendor.sh"
+source "$TR_LIB/monitor.sh"
 
 MODE="${1:-}"
 case "$MODE" in
@@ -79,4 +83,4 @@ fi
 
 # ---- compare vs baseline ----
 step "COMPARE VS BASELINE"
-python3 "$HERE/compare.py" compare --result "$RESULT" --threshold 5
+python3 "$TR_ANALYSIS/compare.py" compare --result "$RESULT" --threshold 5

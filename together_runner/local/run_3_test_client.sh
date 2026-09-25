@@ -6,7 +6,11 @@
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$HERE/config.env"
-source "$HERE/bench_lib.sh"
+TR_LIB="$(cd "$HERE/../lib" && pwd)"
+TR_ANALYSIS="$(cd "$HERE/../analysis" && pwd)"
+source "$TR_LIB/common.sh"
+source "$TR_LIB/vendor.sh"
+source "$TR_LIB/monitor.sh"
 
 check_env_vars ENGINE CONTAINER_NAME PORT MODEL ISL OSL CONC HW CLUSTER PROFILE || exit 1
 BASE="http://localhost:${PORT}"
@@ -16,7 +20,7 @@ curl -sf "${BASE}/health" >/dev/null && pf_pass "healthy" || { trerr "server not
 
 trlog "== Chat completion =="
 curl -s "${BASE}/v1/chat/completions" -H "Content-Type: application/json" \
-  -d "{\"model\":\"${MODEL}\",\"messages\":[{\"role\":\"user\",\"content\":\"In one sentence, what is a B200 GPU?\"}],\"max_tokens\":64,\"temperature\":0}"
+  -d "{\"model\":\"${MODEL}\",\"messages\":[{\"role\":\"user\",\"content\":\"In one sentence, what is a GPU?\"}],\"max_tokens\":64,\"temperature\":0}"
 echo
 
 if [[ "${BENCH:-0}" != "1" ]]; then
@@ -39,8 +43,9 @@ GPU_CSV="$OUTDIR/${NAME}.gpu.csv"
 
 trlog "== Benchmark (engine=$ENGINE ISL=$ISL OSL=$OSL conc=$CONC) =="
 # GPU power/clock sampling on the host (for energy metrics).
-nvidia-smi --query-gpu=timestamp,index,power.draw,temperature.gpu,clocks.current.sm,utilization.gpu \
-    --format=csv -l 1 > "$GPU_CSV" 2>/dev/null &
+# vendor_power_sample_cmd returns a complete streaming command (nvidia-smi
+# --format=csv -l N, or amd-smi metric -w N --csv), so no extra flags here.
+eval "$(vendor_power_sample_cmd "${GPU_SAMPLE_INTERVAL:-1}")" > "$GPU_CSV" 2>/dev/null &
 GPU_MON_PID=$!
 
 # Unified client: the InferenceX vendored benchmark_serving.py (mounted at
@@ -61,7 +66,7 @@ docker cp "$CONTAINER_NAME:$RAW_IN" "$RAW_HOST" 2>/dev/null || true
 
 # Map raw bench output -> InferenceX-schema result JSON (compare.py emit).
 PRECISION=$([[ "$PROFILE" == *fp4* ]] && echo fp4 || echo fp8)
-python3 "$HERE/compare.py" emit \
+python3 "$TR_ANALYSIS/compare.py" emit \
     --raw "$RAW_HOST" --out "$RESULT" --gpu-csv "$GPU_CSV" \
     --hw "$HW" --cluster "$CLUSTER" --model "$MODEL" --framework "$ENGINE" --precision "$PRECISION" \
     --profile "$PROFILE" \
