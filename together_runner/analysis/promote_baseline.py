@@ -6,7 +6,7 @@ drop = non-zero exit). They are keyed by
     baselines/<hw>/[<cluster>/]<framework>/<profile>/<seqtag>/<tuned|untuned>/
         tp<N>_conc<M>.json
 and stored in the nested schema, so results from either runner can be promoted:
-flat official-recipe records are normalised by compare.adapt_flat first.
+flat official-recipe records are normalised by results_lib first.
 
     python3 promote_baseline.py --hw mi350x --dry-run
     python3 promote_baseline.py --hw mi350x
@@ -19,7 +19,7 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
-import compare  # noqa: E402  (same directory)
+from results_lib import iter_results, seqtag  # noqa: E402
 
 TR_ROOT = HERE.parent
 
@@ -39,13 +39,13 @@ def main():
 
     # Keep the newest result per (hw, cluster, fw, profile, seq, tuning, tp, conc).
     best = {}
-    for path, d in compare._iter_results(a.results_dir):
+    for path, d in iter_results(a.results_dir):
         if a.hw and d.get("hw") != a.hw:
             continue
         if a.framework and d.get("framework") != a.framework:
             continue
         key = (d["hw"], d.get("framework"), d.get("profile"),
-               compare._seqtag(d["isl"], d["osl"]),
+               seqtag(d["isl"], d["osl"]),
                "tuned" if d.get("tuning") else "untuned",
                d.get("tp"), d.get("conc"))
         mt = os.path.getmtime(path)

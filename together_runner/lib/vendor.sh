@@ -82,50 +82,26 @@ vendor_amd_render_nodes() {
     done | sort | awk '{print $2}'
 }
 
-# vendor_docker_gpu_flags [comma-separated GPU ids]
+# vendor_set_gpu_flags [comma-separated GPU ids] -> VENDOR_GPU_FLAGS array
 #
-# No ids -> all GPUs.
+# No ids -> all GPUs. Array form avoids quoting problems with
+# --gpus "device=0,1":
+#   vendor_set_gpu_flags [ids]; docker run "${VENDOR_GPU_FLAGS[@]}" ...
 #
 # AMD: we expose device nodes rather than setting ROCR_VISIBLE_DEVICES. The
 # InferenceX recipes contain
 #     if [ -n "$ROCR_VISIBLE_DEVICES" ]; then
 #         export HIP_VISIBLE_DEVICES="$ROCR_VISIBLE_DEVICES"; fi
-# and ROCr filters FIRST, so after ROCR_VISIBLE_DEVICES=N the container holds
-# one device numbered 0; mirroring N into HIP then selects a device that no
-# longer exists and the engine dies with "No HIP GPUs are available" for every
-# N except 0. Exposing device nodes sidesteps it: the container sees exactly
-# the GPUs we grant, renumbered 0..N-1, with both variables unset. It also
-# scopes amd-smi to our GPUs, so power sampling excludes other tenants.
-vendor_docker_gpu_flags() {
-    local ids="${1:-}"
-    case "$(vendor_detect)" in
-        nvidia)
-            if [[ -z "$ids" ]]; then echo "--gpus all"; else echo "--gpus \"device=${ids}\""; fi ;;
-        amd)
-            local flags="--device=/dev/kfd --group-add video --group-add render"
-            mapfile -t _nodes < <(vendor_amd_render_nodes)
-            if [[ -z "$ids" ]]; then
-                flags+=" --device=/dev/dri"
-            else
-                local g
-                IFS=',' read -ra _ids <<< "$ids"
-                for g in "${_ids[@]}"; do
-                    local node="${_nodes[$g]:-}"
-                    if [[ -z "$node" ]]; then
-                        trerr "GPU index $g has no render node (host has ${#_nodes[@]})"
-                        return 1
-                    fi
-                    flags+=" --device=/dev/dri/$node"
-                done
-            fi
-            echo "$flags" ;;
-        *) trerr "no GPU vendor detected"; return 1 ;;
-    esac
-}
-
-# Array form of vendor_docker_gpu_flags, to avoid quoting problems with
-# --gpus "device=0,1". Sets the global VENDOR_GPU_FLAGS array.
-#   vendor_set_gpu_flags [ids]; docker run "${VENDOR_GPU_FLAGS[@]}" ...
+# and ROCr filters FIRST, so by the time HIP sees the list there is only one
+# device left, numbered 0. Mirroring the same index into HIP_VISIBLE_DEVICES
+# then selects a device that no longer exists, and vLLM dies with "No HIP GPUs
+# are available" for every index except 0. On AMD's Slurm cluster this is a
+# no-op because enroot already hands the container exactly $TP GPUs and neither
+# variable is set.
+#
+# Exposing device nodes reproduces that: the container sees exactly the GPUs we
+# grant, renumbered 0..N-1, and both variables stay unset. It also scopes
+# amd-smi to our GPUs, so power sampling excludes other tenants.
 vendor_set_gpu_flags() {
     local ids="${1:-}"
     VENDOR_GPU_FLAGS=()
@@ -153,6 +129,12 @@ vendor_set_gpu_flags() {
             fi ;;
         *) trerr "no GPU vendor detected"; return 1 ;;
     esac
+}
+
+# String form, for logging and for callers that just want to show the flags.
+vendor_docker_gpu_flags() {
+    vendor_set_gpu_flags "${1:-}" || return 1
+    echo "${VENDOR_GPU_FLAGS[*]}"
 }
 
 # Streams a power/clock CSV on the host; $1 = sample interval seconds.

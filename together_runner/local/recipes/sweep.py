@@ -119,8 +119,12 @@ def result_filename(e: dict, runner: str) -> str:
             f'_conc{e["conc"]}_{runner}')
 
 
-def run_one(e: dict, args, work_dir: Path, out_dir: Path) -> dict:
-    rf = result_filename(e, args.hw)
+def build_env(e: dict, args, work_dir: Path, rf: str) -> dict:
+    """The env contract launch_local.sh and process_result.py both read.
+
+    Deliberately the same variable names .github/workflows/benchmark-tmpl.yml
+    exports, so the recipes cannot tell they are running outside CI.
+    """
     env = dict(os.environ)
     env.update({
         "MODEL": args.model_path or e["model"],
@@ -138,6 +142,38 @@ def run_one(e: dict, args, work_dir: Path, out_dir: Path) -> dict:
     })
     if args.gpus:
         env["GPUS"] = args.gpus
+    return env
+
+
+def harvest(work_dir: Path, out_dir: Path, rf: str) -> Path:
+    """Move this config's outputs out of the shared scratch dir."""
+    for name in (f"{rf}.json", f"agg_{rf}.json", "server.log", "gpu_metrics.csv"):
+        src = work_dir / name
+        if src.exists():
+            dst = out_dir / (name if name.startswith(("agg_", rf)) else f"{rf}.{name}")
+            shutil.move(str(src), dst)
+    return out_dir / f"agg_{rf}.json"
+
+
+def stamp_provenance(agg_file: Path, e: dict, args) -> dict:
+    """process_result.py records none of this, but analysis/ groups results by it."""
+    agg = json.loads(agg_file.read_text())
+    agg.setdefault("host", socket.gethostname())
+    agg.setdefault("cluster", os.environ.get("CLUSTER", "local"))
+    agg.setdefault("ts", datetime.now(timezone.utc).isoformat(timespec="seconds"))
+    if args.model_path:
+        # bench_serving records model_id as whatever was passed to --model, so a
+        # local path would land in the schema where the HF id belongs. Restore
+        # the canonical id and keep the path for provenance.
+        agg["model"] = e["model"]
+        agg["model_path"] = args.model_path
+    agg_file.write_text(json.dumps(agg, indent=2))
+    return agg
+
+
+def run_one(e: dict, args, work_dir: Path, out_dir: Path) -> dict:
+    rf = result_filename(e, args.hw)
+    env = build_env(e, args, work_dir, rf)
 
     print(f"\n{'='*78}\n[sweep] {rf}\n{'='*78}", flush=True)
     log_path = out_dir / f"{rf}.launch.log"
@@ -146,34 +182,15 @@ def run_one(e: dict, args, work_dir: Path, out_dir: Path) -> dict:
                             stdout=log, stderr=subprocess.STDOUT).returncode
     if rc != 0:
         print(f"[sweep] FAILED (rc={rc}); see {log_path}", flush=True)
-        for name in ("server.log",):
-            src = work_dir / name
-            if src.exists():
-                shutil.copy(src, out_dir / f"{rf}.{name}")
+        src = work_dir / "server.log"
+        if src.exists():
+            shutil.copy(src, out_dir / f"{rf}.server.log")
         return {"config": rf, "status": "failed", "rc": rc}
 
     # process_result.py reads ./$RESULT_FILENAME.json and writes agg_*.json
     subprocess.run([sys.executable, str(REPO / "utils" / "process_result.py")],
                    env=env, cwd=work_dir, check=True)
-    for name in (f"{rf}.json", f"agg_{rf}.json", "server.log", "gpu_metrics.csv"):
-        src = work_dir / name
-        if src.exists():
-            dst = out_dir / (name if name.startswith(("agg_", rf)) else f"{rf}.{name}")
-            shutil.move(str(src), dst)
-    agg_file = out_dir / f"agg_{rf}.json"
-    agg = json.loads(agg_file.read_text())
-    # Provenance: process_result.py records none of these, but analysis/compare.py
-    # groups fleet results by them.
-    agg.setdefault("host", socket.gethostname())
-    agg.setdefault("cluster", os.environ.get("CLUSTER", "local"))
-    agg.setdefault("ts", datetime.now(timezone.utc).isoformat(timespec="seconds"))
-    if args.model_path:
-        # bench_serving records model_id as whatever was passed to --model, so a
-        # local path would land in the schema where the HF id belongs. Restore the
-        # canonical id and keep the path for provenance.
-        agg["model"] = e["model"]
-        agg["model_path"] = args.model_path
-    agg_file.write_text(json.dumps(agg, indent=2))
+    agg = stamp_provenance(harvest(work_dir, out_dir, rf), e, args)
     print(f"[sweep] OK  tput/gpu={agg['tput_per_gpu']:.0f} tok/s  "
           f"out/gpu={agg['output_tput_per_gpu']:.0f} tok/s", flush=True)
     return {"config": rf, "status": "ok", "agg": agg}

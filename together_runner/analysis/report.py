@@ -1,85 +1,105 @@
 #!/usr/bin/env python3
-"""Collect every agg_*.json under results/ into one table.
+"""Tabulate measured results as Markdown (and optionally CSV).
 
-A sweep is often split across several invocations (different TP values, reruns
-after a failure), so results live in several timestamped directories. This
-reads the JSON fields rather than the paths, so the split does not matter.
+Reads every result under results/ through results_lib, so both schemas -- the
+bespoke-profile runner's and the official-recipe runner's -- appear in one
+table, on either vendor. A sweep is usually split across several timestamped
+directories (different TP values, reruns after a failure); results are keyed on
+their embedded fields, not their path, so the split does not matter.
 
-    python3 report.py                 # markdown table
-    python3 report.py --csv out.csv   # also write CSV
+    python3 report.py                      # every result, grouped
+    python3 report.py --hw mi350x          # one hardware tag
+    python3 report.py --csv out.csv        # also write CSV
 """
 import argparse
-import json
+import csv
+import sys
 from pathlib import Path
 
-HERE = Path(__file__).resolve().parent
-TR_ROOT = HERE.parent
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from results_lib import latest_per_config, seqtag  # noqa: E402
+
+TR_ROOT = Path(__file__).resolve().parent.parent
+
+COLUMNS = [
+    ("TP", lambda d: f'{d["tp"]}'),
+    ("conc", lambda d: f'{d["conc"]}'),
+    ("tput/GPU (tok/s)", lambda d: _fmt(_per_gpu(d, "total_token_throughput"), ",.0f")),
+    ("output/GPU", lambda d: _fmt(_per_gpu(d, "output_token_throughput"), ",.0f")),
+    ("median TTFT (ms)", lambda d: _fmt(d["metrics"].get("median_ttft_ms"), ",.0f")),
+    ("p99 TTFT (ms)", lambda d: _fmt(d["metrics"].get("p99_ttft_ms"), ",.0f")),
+    ("median TPOT (ms)", lambda d: _fmt(d["metrics"].get("median_tpot_ms"), ".2f")),
+    ("W/GPU", lambda d: _fmt(d.get("gpu", {}).get("mean_power_per_gpu_w"), ",.0f")),
+    ("tok/kW", lambda d: _fmt(d.get("gpu", {}).get("tokens_per_kw"), ",.0f")),
+]
 
 
-def load(results_dir: Path) -> list[dict]:
-    rows = []
-    for f in sorted(results_dir.rglob("agg_*.json")):
-        d = json.loads(f.read_text())
-        # Later sweeps supersede earlier ones for the same config key.
-        rows.append((f.stat().st_mtime, d))
-    best: dict[tuple, dict] = {}
-    for mtime, d in rows:
-        key = (d["hw"], d["framework"], d["infmax_model_prefix"],
-               d["isl"], d["osl"], d["tp"], d["ep"], d["conc"])
-        if key not in best or mtime > best[key][0]:
-            best[key] = (mtime, d)
-    return [d for _, d in sorted(best.values(), key=lambda x: (x[1]["tp"], x[1]["conc"]))]
+def _fmt(v, spec):
+    """Format a metric, or '-' when it is missing.
+
+    Every cell goes through this: a bare conditional around a multi-part
+    f-string silently replaces the WHOLE row, not the one absent field.
+    """
+    return format(v, spec) if isinstance(v, (int, float)) else "-"
 
 
-def tok_per_mw(d: dict) -> float | None:
-    p = d.get("avg_power_w")
-    if not p:
-        return None
-    # tok/s/GPU divided by W/GPU = tok/J; x1e6 W per MW.
-    return d["tput_per_gpu"] / p * 1e6
+def _per_gpu(d, key):
+    """Metrics are cluster totals; the table reports per-GPU."""
+    v = d["metrics"].get(key)
+    tp = d.get("tp") or 1
+    return v / tp if isinstance(v, (int, float)) else None
+
+
+def group_key(d):
+    return (d.get("hw"), d.get("framework"), d.get("profile"),
+            d.get("model"), seqtag(d["isl"], d["osl"]), d.get("image"))
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--results", default=str(TR_ROOT / "results"))
+    ap.add_argument("--hw", help="only this hardware tag")
+    ap.add_argument("--framework", help="only this framework")
     ap.add_argument("--csv")
     args = ap.parse_args()
 
-    rows = load(Path(args.results))
+    rows = latest_per_config(args.results, hw=args.hw, framework=args.framework)
     if not rows:
-        print("no results found")
-        return
+        print(f"no results found under {args.results}")
+        return 1
 
-    h = rows[0]
-    print(f"**{h['infmax_model_prefix']} · {h['precision']} · {h['framework']}** "
-          f"({h['model']}) — {h['hw']}, {h['isl']//1024}k{h['osl']//1024}k, "
-          f"image `{h['image']}`\n")
-    print("| TP | conc | tput/GPU (tok/s) | output/GPU | median TTFT (ms) | "
-          "p99 TTFT (ms) | median TPOT (ms) | avg W/GPU | tok/s per MW |")
-    print("|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
+    groups = {}
     for d in rows:
-        tm = tok_per_mw(d)
-        print(f"| {d['tp']} | {d['conc']} | {d['tput_per_gpu']:,.0f} | "
-              f"{d['output_tput_per_gpu']:,.0f} | {d['median_ttft']*1000:,.0f} | "
-              f"{d['p99_ttft']*1000:,.0f} | {d['median_tpot']*1000:.2f} | "
-              f"{d.get('avg_power_w', float('nan')):,.0f} | "
-              f"{tm:,.0f}" if tm else "n/a", end="")
-        print(" |")
+        groups.setdefault(group_key(d), []).append(d)
+
+    for (hw, fw, profile, model, seq, image), items in sorted(
+            groups.items(), key=lambda kv: [str(x) for x in kv[0]]):
+        print(f"**{profile} · {fw}** ({model}) — {hw}, {seq}, image `{image}`\n")
+        print("| " + " | ".join(c[0] for c in COLUMNS) + " |")
+        print("|" + "|".join("---:" for _ in COLUMNS) + "|")
+        for d in sorted(items, key=lambda x: (x.get("tp") or 0, x.get("conc") or 0)):
+            print("| " + " | ".join(fn(d) for _, fn in COLUMNS) + " |")
+        print()
 
     if args.csv:
-        import csv
-        keys = ["hw", "framework", "precision", "model", "isl", "osl", "tp", "ep",
-                "conc", "tput_per_gpu", "output_tput_per_gpu", "median_ttft",
-                "p99_ttft", "median_tpot", "avg_power_w", "joules_per_output_token"]
+        keys = ["hw", "cluster", "host", "ts", "framework", "precision", "model",
+                "isl", "osl", "tp", "ep", "conc"]
+        metric_keys = ["total_token_throughput", "output_token_throughput",
+                       "median_ttft_ms", "p99_ttft_ms", "median_tpot_ms",
+                       "median_e2el_ms"]
         with open(args.csv, "w", newline="") as fh:
-            w = csv.DictWriter(fh, fieldnames=keys + ["tok_per_mw"])
+            w = csv.DictWriter(fh, fieldnames=keys + metric_keys
+                               + ["mean_power_per_gpu_w", "tokens_per_kw"])
             w.writeheader()
             for d in rows:
                 r = {k: d.get(k) for k in keys}
-                r["tok_per_mw"] = tok_per_mw(d)
+                r.update({k: d["metrics"].get(k) for k in metric_keys})
+                r["mean_power_per_gpu_w"] = d.get("gpu", {}).get("mean_power_per_gpu_w")
+                r["tokens_per_kw"] = d.get("gpu", {}).get("tokens_per_kw")
                 w.writerow(r)
-        print(f"\nwrote {args.csv}")
+        print(f"wrote {args.csv}")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

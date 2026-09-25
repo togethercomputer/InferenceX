@@ -67,6 +67,24 @@ python3 analysis/compare.py compare --result <agg.json>   # regression gate
 python3 analysis/promote_baseline.py --hw mi350x --dry-run
 ```
 
+## Per-box paths
+
+Storage defaults live in `lib/paths.sh` and are deliberately generic so a fresh
+clone works anywhere. Real boxes keep weights on different arrays, so per-box
+values go in `paths.local.sh` at the root of `together_runner/` — gitignored,
+sourced first, and the only place a machine-specific absolute path belongs:
+
+```bash
+# together_runner/paths.local.sh
+TR_HF_CACHE=/mnt/data/$USER/hf-cache
+TR_WORK_DIR=/mnt/data/$USER/inferencex-work
+TR_VLLM_CACHE=/mnt/data/$USER/vllm-cache
+TR_TRITON_CACHE=/mnt/data/$USER/triton-cache
+```
+
+Both front ends read these, so weights and compile caches are shared rather
+than downloaded twice.
+
 ## Vendor support
 
 Everything vendor-specific is behind `lib/vendor.sh`:

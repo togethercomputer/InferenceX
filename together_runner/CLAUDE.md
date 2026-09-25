@@ -53,6 +53,19 @@ cluster totals). Committed b200 baselines were NOT rewritten.
 Baseline leaf is `tp<N>_conc<M>.json` — TP must be in the key because an official
 sweep varies TP; bare `conc<M>.json` still resolves via fallback.
 
+## Paths
+`lib/paths.sh` holds generic defaults; per-box absolute paths go in
+`together_runner/paths.local.sh` (gitignored, sourced first): `TR_HF_CACHE`,
+`TR_MODELS_ROOT`, `TR_WORK_DIR`, `TR_VLLM_CACHE`, `TR_TRITON_CACHE`.
+On tg-ai-node4 they point at `/mnt/data/johnson/*` (`/` is tight, `/mnt/data2`
+is read-only). Both front ends read them, so weights/caches are shared.
+
+## Analysis tools
+`analysis/results_lib.py` is the single loader: it normalises the flat
+`process_result.py` record into the nested schema, so compare.py, report.py and
+promote_baseline.py cannot drift. Add new tools on top of it, never re-glob
+results.
+
 ## Gotchas
 - `docker-proxy` holds host PORT for the container's life; only one engine per
   port. Default port here is **8710** (8888 is taken by another tenant).

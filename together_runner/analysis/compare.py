@@ -15,95 +15,17 @@ import json
 import os
 import sys
 from datetime import datetime, timezone
+from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from results_lib import (  # noqa: E402
+    adapt_flat, is_flat_inferencex, iter_results, seqtag,
+)
 
-# --------------------------- schema adapter --------------------------------
-# Two result schemas coexist:
-#   * the bespoke-profile runner (local/run_3) writes the nested schema below,
-#     which is also what baselines/ hold: {hw, cluster, host, metrics{...}, ...}
-#   * the official-recipe runner (local/recipes) writes the FLAT record from
-#     utils/process_result.py, which has no "metrics" key at all.
-# Normalising the flat one here means AMD/NVIDIA recipe runs land in the same
-# tables and regression gate as the profile runs, and the committed baselines
-# stay byte-identical.
-
-# flat InferenceX key -> nested metrics key
-_FLAT_METRIC_KEYS = {
-    "total_token_throughput": "total_token_throughput",
-    "output_throughput": "output_token_throughput",
-    "request_throughput": "request_throughput",
-    "median_ttft": "median_ttft_ms",
-    "p99_ttft": "p99_ttft_ms",
-    "median_tpot": "median_tpot_ms",
-    "p99_tpot": "p99_tpot_ms",
-    "median_itl": "median_itl_ms",
-    "median_e2el": "median_e2el_ms",
-    "p99_e2el": "p99_e2el_ms",
-}
-
-
-def is_flat_inferencex(d):
-    """A utils/process_result.py record: flat, has tput_per_gpu, no metrics."""
-    return (isinstance(d, dict) and "metrics" not in d
-            and "hw" in d and "tput_per_gpu" in d)
-
-
-def adapt_flat(d):
-    """Normalise a flat InferenceX record into the nested schema used here.
-
-    process_result.py stores seconds (it divides every *_ms field by 1000) and
-    per-GPU throughput; the nested schema wants milliseconds and cluster totals,
-    so scale on the way in.
-    """
-    tp = int(d.get("tp") or 1)
-    metrics = {}
-    for flat, nested in _FLAT_METRIC_KEYS.items():
-        v = d.get(flat)
-        if v is None:
-            continue
-        metrics[nested] = v * 1000.0 if nested.endswith("_ms") else v
-    # tput_per_gpu is per GPU; the nested schema records the cluster total.
-    if "tput_per_gpu" in d:
-        metrics["total_token_throughput"] = d["tput_per_gpu"] * tp
-    if "output_tput_per_gpu" in d:
-        metrics["output_token_throughput"] = d["output_tput_per_gpu"] * tp
-
-    # Match the nested schema's gpu block (see baselines/*.json).
-    gpu = {}
-    if d.get("avg_power_w"):
-        per_gpu = d["avg_power_w"]
-        gpu = {
-            "n_gpus": tp,
-            "mean_power_per_gpu_w": round(per_gpu, 1),
-            "total_avg_power_w": round(per_gpu * tp, 1),
-            # tokens/kW, same definition as the profile runner: cluster
-            # throughput divided by cluster power, scaled to kW.
-            "tokens_per_kw": round(
-                metrics.get("total_token_throughput", 0) / (per_gpu * tp) * 1000.0, 1)
-            if per_gpu else None,
-        }
-    return {
-        "hw": d.get("hw"),
-        "cluster": d.get("cluster", os.environ.get("CLUSTER", "local")),
-        "host": d.get("host", ""),
-        "ts": d.get("ts", ""),
-        "model": d.get("model"),
-        "framework": d.get("framework"),
-        "precision": d.get("precision"),
-        "isl": d.get("isl"), "osl": d.get("osl"),
-        "tp": tp, "ep": d.get("ep"), "conc": d.get("conc"),
-        # The recipe runner has no PROFILE; synthesise the baseline key from the
-        # model prefix + precision so it lines up with baselines/<hw>/<fw>/<profile>/.
-        "profile": d.get("profile") or
-                   f'{d.get("infmax_model_prefix", "?")}-{d.get("precision", "?")}',
-        "image": d.get("image"),
-        # tuning is 0/1 in this schema, not a word. The official recipes do not
-        # expose an autotune switch, so recipe runs are recorded untuned.
-        "tuning": int(d.get("tuning", 0) or 0),
-        "source": "recipe",
-        "metrics": metrics,
-        "gpu": gpu,
-    }
+# Result loading and schema normalisation live in results_lib, so compare.py,
+# report.py and promote_baseline.py cannot drift on how a result is read.
+_iter_results = iter_results
+_seqtag = seqtag
 
 
 # --------------------------- shared helpers --------------------------------
@@ -201,10 +123,6 @@ def cmd_emit(a):
 
 
 # --------------------------- compare ---------------------------------------
-def _seqtag(isl, osl):
-    f = lambda n: f"{n // 1024}k" if n % 1024 == 0 else str(n)
-    return f(isl) + f(osl)
-
 
 def _baseline_candidates(baselines_dir, r):
     # Key dimensions: hw / framework / profile / seqtag / tuning / conc.
@@ -303,26 +221,6 @@ def cmd_compare(a):
 
 
 # --------------------------- collect --------------------------------------
-def _iter_results(results_dir):
-    """Yield (path, dict) for schema result JSONs (skip raw *.bench.json)."""
-    for root, _, files in os.walk(results_dir):
-        for fn in files:
-            if not fn.endswith(".json") or fn.endswith(".bench.json"):
-                continue
-            p = os.path.join(root, fn)
-            try:
-                d = json.load(open(p))
-            except (json.JSONDecodeError, OSError):
-                continue
-            if isinstance(d, dict) and "metrics" in d and "hw" in d:
-                yield p, d
-            elif is_flat_inferencex(d):
-                # agg_*.json from the official-recipe runner; the sibling
-                # non-agg file is the raw bench output, so only take agg_.
-                if fn.startswith("agg_"):
-                    yield p, adapt_flat(d)
-
-
 def cmd_collect(a):
     rows = []
     for _, d in _iter_results(a.results_dir):
