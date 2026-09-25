@@ -1,0 +1,35 @@
+{
+  "hw": "mi350x",
+  "cluster": "together",
+  "host": "tg-ai-node4",
+  "ts": "2026-09-25T19:40:15+00:00",
+  "model": "openai/gpt-oss-120b",
+  "framework": "vllm",
+  "precision": "fp4",
+  "isl": 1024,
+  "osl": 1024,
+  "tp": 4,
+  "ep": 1,
+  "conc": 8,
+  "profile": "gptoss-fp4",
+  "image": "vllm/vllm-openai-rocm:v0.22.0",
+  "tuning": 0,
+  "source": "recipe",
+  "metrics": {
+    "median_ttft_ms": 32.781791407614946,
+    "p99_ttft_ms": 122.73854725062847,
+    "median_tpot_ms": 4.018134094168618,
+    "p99_tpot_ms": 4.03770502572743,
+    "median_itl_ms": 3.9550387300550938,
+    "median_e2el_ms": 3789.5253803581,
+    "p99_e2el_ms": 4154.927949970588,
+    "total_token_throughput": 3862.094057856187,
+    "output_token_throughput": 1938.205187904492
+  },
+  "gpu": {
+    "n_gpus": 4,
+    "mean_power_per_gpu_w": 531.6,
+    "total_avg_power_w": 2126.6,
+    "tokens_per_kw": 1816.1
+  }
+}
