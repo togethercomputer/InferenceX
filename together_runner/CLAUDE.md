@@ -1,91 +1,78 @@
 # together_runner — Claude Code memory
 
-Single-node (this 8×B200) **multi-engine** (SGLang + vLLM) inference benchmark
-harness for InferenceX. Standalone helper scripts; does NOT touch the CI sweep.
-Built on patterns from `../benchmarks/benchmark_lib.sh`,
-`../runners/launch_b200-dgxc.sh`, `../benchmarks/single_node/fixed_seq_len/`.
+Together's InferenceX benchmark harnesses for **NVIDIA and AMD** boxes we
+control. Standalone; does NOT touch the CI sweep. The upstream `../runners/`
+launchers all need a scheduler (Slurm + enroot); these use plain Docker.
 
-## What it does (3 pillars)
-1. **Two-tier smoke** — `run_0_preflight.sh` (gate-1: env/machine, seconds) +
-   gate-2 minimal real completion inside `--full`.
-2. **Weight externalization** — `prestage_weights.sh` downloads once to
-   `$MODELS_ROOT/$PROFILE` (+`.ready`); launches then do ZERO download.
-3. **Staged monitoring + baseline/delta** — `bench_lib.sh` maps server-log
-   markers (engine-aware) to named stages with per/next-stage + to-ready ETA;
-   `compare.py` diffs results vs committed baselines (throughput ±5%) and
-   `collect`s the whole fleet.
-
-## Run it
-```bash
-cd together_runner
-# SGLang (default engine), DSR1-FP4:
-bash run_all.sh --smoke|--full|--baseline
-# vLLM, gpt-oss-120b FP4:
-ENGINE=vllm PROFILE=gptoss-fp4 bash run_all.sh --full
-# sweep concurrencies into baselines (one warm server):
-ENGINE=vllm PROFILE=gptoss-fp4 CONC_LIST="16 64 128" bash record_baselines.sh
-python3 compare.py collect        # fleet table (+Δ vs baseline), framework column
-python3 compare.py table --write-readme   # refresh the Baseline results table in README.md
+## Layout (reorganised 2026-09-25 — by capability, not by vendor)
 ```
-All config in `config.env` (sourced everywhere; override by exporting first).
-Each step also runs standalone (`bash run_2_launch_server.sh`).
+lib/      common.sh (log/env/timers/preflight) · vendor.sh (ALL NVIDIA-vs-AMD
+          differences) · monitor.sh (staged startup + ETA)
+local/    single-node both vendors: config.env run_0..3 run_all.sh
+          prestage_weights.sh record_baselines.sh   (bespoke profiles)
+          recipes/  launch_local.sh + sweep.py      (official recipes)
+multinode/slurm-disagg/
+analysis/ compare.py · report.py · promote_baseline.py
+baselines/<hw>/[<cluster>/]<fw>/<profile>/<seq>/<tuned|untuned>/tp<N>_conc<M>.json
+results/<hw>/<prefix>-<fw>-<stamp>/     (gitignored)
+```
+`<hw>` (b200, mi350x, ...) keys both trees, so vendors coexist unchanged.
 
-## Key config (config.env)
-- **`ENGINE`** = `sglang` (default) | `vllm`  → also the *framework* dimension.
-- **`PROFILE`** = recipe: `dsr1-fp4` (sglang, TP8/EP8) · `gptoss-fp4`
-  (vllm, openai/gpt-oss-120b, TP4) · `smoke` (Llama-8B, TP1). MODEL/TP/EP default
-  per profile.
-- Per-engine default `IMAGE`: sglang→`lmsysorg/sglang:dev-cu13`,
-  vllm→`vllm/vllm-openai:v0.22.0`. `CONTAINER_NAME` defaults to `tr_<engine>`.
-- **`ENABLE_TUNING`** default **0**. sglang: `--disable-flashinfer-autotune`
-  (fast ~5m vs ~15-24m tuned). **vLLM: label only** (no separable fp4 autotune).
-- Paths on the 14TB array under `/scratch/home/johnson/`: `HF_CACHE`,
-  `MODELS_ROOT`, `FLASHINFER_CACHE`. NEVER use the 34GB root disk for weights.
-- `REPO_ROOT` (repo root) is mounted read-only at `/inferencex` in the container
-  so the **unified bench client** `utils/bench_serving/benchmark_serving.py` is
-  available to BOTH engines (identical metric definitions → fair comparison).
+## Two front ends, one set of plumbing
+- **bespoke** (`local/run_all.sh`): hand-written recipes per (ENGINE, PROFILE);
+  gives staged startup ETA, weight prestaging, baseline regression gate.
+- **official** (`local/recipes/sweep.py`): runs `benchmarks/single_node/**`
+  UNMODIFIED from the generated CI matrix -> comparable to published numbers.
+  Auto-routes `amd-master.yaml` vs `nvidia-master.yaml` off `--recipe-runner`.
+  `--hw` defaults to the detected GPU; `--recipe-runner` defaults to `--hw`
+  (MI350X uses `--recipe-runner mi355x --hw mi350x`, same gfx950 silicon).
 
-## Directory layout (scales across hw × cluster × host × date × framework × recipe × conc)
-- **results/** (gitignored, raw, provenance-first):
-  `results/<hw>/<cluster>/<host>/<date>/<engine>_<profile>_<seqtag>_<tuned|untuned>_conc<N>.json`
-  + companion `*.bench.json` (raw) and `*.gpu.csv`.
-- **baselines/** (committed golden):
-  `baselines/<hw>/<framework>/<profile>/<seqtag>/<tuned|untuned>/conc<N>.json`,
-  optional per-cluster override `baselines/<hw>/<cluster>/<framework>/...`
-  (compare prefers cluster-specific, falls back to hw-wide). `record_baselines.sh`
-  saves hw-wide by default; `BASELINE_CLUSTER=1` scopes under the cluster.
-- Query any axis with `compare.py collect` (reads embedded JSON fields, not path).
+## lib/vendor.sh — the whole point
+`vendor_detect / vendor_smi / vendor_gpu_count / vendor_gpu_busy_count /
+vendor_set_gpu_flags (array) / vendor_power_sample_cmd / vendor_amd_render_nodes`.
 
-## Baselines & metrics
-- Compare key = `(hw, framework, profile, seqtag, tuning, conc)`. **Keep ENGINE +
-  ENABLE_TUNING consistent** between reference and test (framework keeps engines
-  apart; tuning keeps tuned/untuned apart — autotune alone moves throughput ~4–10%).
-- Primary pass/fail: `total_token_throughput`, regression if it drops **>5%** vs
-  baseline (`compare.py compare` → non-zero exit). Result JSON mirrors
-  `../utils/process_result.py` (reuse `collect_results.py`/`summarize.py`).
-- Reference baselines on THIS node (`gpu-dp-96sjj-gkwph`), 1k1k, unified client
-  (`benchmark_serving.py`), total tok/s:
-  - **sglang dsr1-fp4 tuned**: conc16=2288 · 64=5684 · 128=9672 · 256=14749
-  - **vllm gpt-oss-120b (TP4, untuned)**: conc16=13952 · 64=37333 · 128=49232 · 256=61760 · 512=75788
-  (different models — not a head-to-head; gpt-oss-120b is far lighter than DSR1's MoE.)
+**AMD traps encoded there:**
+- NEVER select GPUs with `ROCR_VISIBLE_DEVICES`. Recipes mirror it into
+  `HIP_VISIBLE_DEVICES`, ROCr filters FIRST -> the container has one device
+  numbered 0 -> mirroring N picks a device that does not exist ->
+  `No HIP GPUs are available` for every N except 0. Select by **render node**
+  (`--device=/dev/dri/renderD*`). Bonus: scopes `amd-smi` to our GPUs.
+- ROCR index != rocm-smi index. Map by sorting PRIMARY render nodes
+  (skip `amdgpu_xcp_*`) by PCI address.
+- `amd-smi -w` emits a `CTRL + C` preamble and repeats headers — filter with the
+  same awk as `benchmarks/benchmark_lib.sh:start_gpu_monitor`.
+- Engine images ENTRYPOINT to `vllm`/`sglang` — need `--entrypoint bash`
+  (= the official launchers' `--no-container-entrypoint`).
 
-## Startup stages
-- sglang: engine-init → weight-load → [autotune ~12m if ENABLE_TUNING=1] →
-  graph-capture → ready (markers: `Load weight begin`, `Tuning fp4_gemm`,
-  `Capture cuda graph begin`).
-- vllm: engine-init → weight-load → graph-capture → ready, no autotune (markers:
-  `Loading model weights`, `Capturing CUDA graph`). Readiness via `/health` (both).
-- Live: `docker exec tr_<engine> tail -f /root/server.log`.
+## Result schemas (two, bridged)
+- **nested** `{hw, cluster, host, metrics{...}, gpu{...}}` — `local/run_3`, and
+  what `baselines/` hold. `tuning` is **0/1 int**, not a word.
+- **flat** — `utils/process_result.py` record, no `metrics` key; official runner.
+`compare.adapt_flat()` converts flat->nested on read (seconds->ms, per-GPU->
+cluster totals). Committed b200 baselines were NOT rewritten.
+Baseline leaf is `tp<N>_conc<M>.json` — TP must be in the key because an official
+sweep varies TP; bare `conc<M>.json` still resolves via fallback.
+
+## Paths
+`lib/paths.sh` holds generic defaults; per-box absolute paths go in
+`together_runner/paths.local.sh` (gitignored, sourced first): `TR_HF_CACHE`,
+`TR_MODELS_ROOT`, `TR_WORK_DIR`, `TR_VLLM_CACHE`, `TR_TRITON_CACHE`.
+On tg-ai-node4 they point at `/mnt/data/johnson/*` (`/` is tight, `/mnt/data2`
+is read-only). Both front ends read them, so weights/caches are shared.
+
+## Analysis tools
+`analysis/results_lib.py` is the single loader: it normalises the flat
+`process_result.py` record into the nested schema, so compare.py, report.py and
+promote_baseline.py cannot drift. Add new tools on top of it, never re-glob
+results.
 
 ## Gotchas
-- **docker-proxy holds host PORT for the container's whole life** — preflight's
-  port check is container-aware (only flags a *different* container/process).
-  Only one engine can own PORT 8888 at a time; stop the other first.
-- **Reuse container → relaunch fresh server**: `pkill -f "$(server_proc_pat)"`
-  (sglang.launch_server / vllm serve) first; record_baselines.sh does this.
-- vLLM specifics: image must be pulled first (`docker pull vllm/vllm-openai:v0.22.0`);
-  OOM at load → set `VLLM_OOM_GUARD=1` or lower `GPU_MEM_UTIL` (KLAUD_DEBUG §2);
-  both engines launch with `--served-model-name $MODEL` so bench/chat model id matches.
-- See `../KLAUD_DEBUG.md` for B200/B300 OOM / DeepGemm / timeout modes.
-- Teardown: `docker exec tr_<engine> pkill -f "$(...)"` or `docker rm -f tr_<engine>`.
+- `docker-proxy` holds host PORT for the container's life; only one engine per
+  port. Default port here is **8710** (8888 is taken by another tenant).
+- Set `VLLM_CACHE_ROOT`/`TRITON_CACHE_DIR` to host dirs or every config
+  recompiles cold.
+- Shared box: check `vendor_gpu_busy_count` before taking GPUs.
 - Commit identity for this repo: `Johnsonms <lizhaofu@gmail.com>`, no Claude trailer.
+
+See `README.md` (structure + vendor matrix) and `local/recipes/README.md`
+(weight prestaging, `--model-path`, network traps).

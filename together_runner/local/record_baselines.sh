@@ -10,7 +10,10 @@
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$HERE/config.env"
-source "$HERE/bench_lib.sh"
+TR_LIB="$(cd "$HERE/../lib" && pwd)"
+source "$TR_LIB/common.sh"
+source "$TR_LIB/vendor.sh"
+source "$TR_LIB/monitor.sh"
 
 CONC_LIST="${CONC_LIST:-16 64 128}"
 # Baselines mean PEAK performance -> keep sglang autotune on. vLLM has no

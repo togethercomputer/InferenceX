@@ -9,7 +9,10 @@
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$HERE/config.env"
-source "$HERE/bench_lib.sh"
+TR_LIB="$(cd "$HERE/../lib" && pwd)"
+source "$TR_LIB/common.sh"
+source "$TR_LIB/vendor.sh"
+source "$TR_LIB/monitor.sh"
 
 check_env_vars MODEL PROFILE MODELS_ROOT || exit 1
 

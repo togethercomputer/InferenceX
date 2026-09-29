@@ -15,6 +15,17 @@ import json
 import os
 import sys
 from datetime import datetime, timezone
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from results_lib import (  # noqa: E402
+    adapt_flat, is_flat_inferencex, iter_results, seqtag,
+)
+
+# Result loading and schema normalisation live in results_lib, so compare.py,
+# report.py and promote_baseline.py cannot drift on how a result is read.
+_iter_results = iter_results
+_seqtag = seqtag
 
 
 # --------------------------- shared helpers --------------------------------
@@ -112,10 +123,6 @@ def cmd_emit(a):
 
 
 # --------------------------- compare ---------------------------------------
-def _seqtag(isl, osl):
-    f = lambda n: f"{n // 1024}k" if n % 1024 == 0 else str(n)
-    return f(isl) + f(osl)
-
 
 def _baseline_candidates(baselines_dir, r):
     # Key dimensions: hw / framework / profile / seqtag / tuning / conc.
@@ -123,14 +130,24 @@ def _baseline_candidates(baselines_dir, r):
     # apart (autotune alone moves throughput ~4-10%). Try cluster-specific golden
     # first, then the hw-wide golden.
     tune = "tuned" if int(r.get("tuning", 0)) == 1 else "untuned"
-    seq, leaf = _seqtag(r["isl"], r["osl"]), f"conc{r['conc']}.json"
+    seq = _seqtag(r["isl"], r["osl"])
     fw = r.get("framework", "")
+    # Leaf name. The original key had no TP because each bespoke profile pinned
+    # one TP; an official-recipe sweep varies TP, so TP1/TP4/TP8 at the same
+    # concurrency would all collide on conc<N>.json. Prefer a TP-qualified leaf
+    # and fall back to the bare one, which keeps the committed b200 baselines
+    # (written before TP was part of the key) resolvable.
+    leaves = []
+    if r.get("tp"):
+        leaves.append(f"tp{int(r['tp'])}_conc{r['conc']}.json")
+    leaves.append(f"conc{r['conc']}.json")
     cands = []
-    if fw and r.get("cluster"):
-        cands.append(os.path.join(baselines_dir, r["hw"], r["cluster"], fw,
-                                  r["profile"], seq, tune, leaf))
-    if fw:
-        cands.append(os.path.join(baselines_dir, r["hw"], fw, r["profile"], seq, tune, leaf))
+    for leaf in leaves:
+        if fw and r.get("cluster"):
+            cands.append(os.path.join(baselines_dir, r["hw"], r["cluster"], fw,
+                                      r["profile"], seq, tune, leaf))
+        if fw:
+            cands.append(os.path.join(baselines_dir, r["hw"], fw, r["profile"], seq, tune, leaf))
     return cands
 
 
@@ -148,6 +165,10 @@ _REPORT = [
 def cmd_compare(a):
     with open(a.result) as f:
         cur = json.load(f)
+    # Accept either schema: an agg_*.json from the official-recipe runner is
+    # flat and has no "profile"/"metrics", which every lookup below needs.
+    if is_flat_inferencex(cur):
+        cur = adapt_flat(cur)
     if a.baseline:
         bpath = a.baseline if os.path.exists(a.baseline) else None
     else:
@@ -161,6 +182,8 @@ def cmd_compare(a):
         return 0
     with open(bpath) as f:
         base = json.load(f)
+    if is_flat_inferencex(base):
+        base = adapt_flat(base)
 
     cm, bm = cur["metrics"], base["metrics"]
     print(f"\n=== delta vs baseline ({os.path.relpath(bpath)}) ===")
@@ -198,21 +221,6 @@ def cmd_compare(a):
 
 
 # --------------------------- collect --------------------------------------
-def _iter_results(results_dir):
-    """Yield (path, dict) for schema result JSONs (skip raw *.bench.json)."""
-    for root, _, files in os.walk(results_dir):
-        for fn in files:
-            if not fn.endswith(".json") or fn.endswith(".bench.json"):
-                continue
-            p = os.path.join(root, fn)
-            try:
-                d = json.load(open(p))
-            except (json.JSONDecodeError, OSError):
-                continue
-            if isinstance(d, dict) and "metrics" in d and "hw" in d:
-                yield p, d
-
-
 def cmd_collect(a):
     rows = []
     for _, d in _iter_results(a.results_dir):
@@ -232,16 +240,17 @@ def cmd_collect(a):
                      d.get("profile"), f'{d.get("isl")}/{d.get("osl")}',
                      "T" if d.get("tuning") else "U", d.get("conc"),
                      m.get("total_token_throughput"), m.get("median_tpot_ms"),
-                     d.get("gpu", {}).get("tokens_per_kw"), delta))
+                     d.get("gpu", {}).get("tokens_per_kw"), delta, d.get("tp")))
     # sort by hw, framework, cluster, host, tuning, conc, ts
-    rows.sort(key=lambda r: (r[1] or "", r[2] or "", r[3] or "", r[4] or "", r[7], r[8] or 0, r[0]))
-    print(f"{'hw':<6}{'fw':<7}{'cluster':<10}{'host':<20}{'profile':<12}{'seq':>8}{'t':>2}"
-          f"{'conc':>6}{'tot_tok/s':>11}{'mTPOT':>8}{'tok/kW':>8}{'Δ%base':>9}")
+    rows.sort(key=lambda r: (r[1] or "", r[2] or "", r[3] or "", r[4] or "", r[7],
+                             r[13] or 0, r[8] or 0, r[0]))
+    print(f"{'hw':<8}{'fw':<7}{'cluster':<10}{'host':<16}{'profile':<12}{'seq':>10}{'t':>2}"
+          f"{'tp':>3}{'conc':>6}{'tot_tok/s':>11}{'mTPOT':>8}{'tok/kW':>8}{'Δ%base':>9}")
     for r in rows:
         dl = f"{r[12]:+.1f}" if r[12] is not None else "-"
         kw = f"{r[11]:.0f}" if r[11] else "-"
-        print(f"{(r[1] or '?'):<6}{(r[2] or '?'):<7}{(r[3] or '?'):<10}{(r[4] or '?'):<20}"
-              f"{(r[5] or '?'):<12}{r[6]:>8}{r[7]:>2}{(r[8] or 0):>6}"
+        print(f"{(r[1] or '?'):<8}{(r[2] or '?'):<7}{(r[3] or '?'):<10}{(r[4] or '?'):<16}"
+              f"{(r[5] or '?'):<12}{r[6]:>10}{r[7]:>2}{(r[13] or 0):>3}{(r[8] or 0):>6}"
               f"{(r[9] or 0):>11.0f}{(r[10] or 0):>8.1f}{kw:>8}{dl:>9}")
     print(f"\n{len(rows)} result(s) under {a.results_dir}")
     return 0

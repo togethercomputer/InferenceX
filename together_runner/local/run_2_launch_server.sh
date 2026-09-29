@@ -7,7 +7,10 @@
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$HERE/config.env"
-source "$HERE/bench_lib.sh"
+TR_LIB="$(cd "$HERE/../lib" && pwd)"
+source "$TR_LIB/common.sh"
+source "$TR_LIB/vendor.sh"
+source "$TR_LIB/monitor.sh"
 
 check_env_vars ENGINE CONTAINER_NAME PORT PROFILE MODEL TP || exit 1
 SMOKE="${SMOKE:-0}"
@@ -79,7 +82,12 @@ case "$ENGINE" in
     else
         STAGE_PLAN="engine-init weight-load graph-capture"
     fi
-    VENV="VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8=1 TORCH_CUDA_ARCH_LIST=10.0 PYTHONNOUSERSITE=1 VLLM_ENGINE_READY_TIMEOUT_S=3600"
+    VENV="PYTHONNOUSERSITE=1 VLLM_ENGINE_READY_TIMEOUT_S=3600"
+    # FlashInfer MoE + CUDA arch are NVIDIA-only. The bespoke profiles below are
+    # Blackwell recipes; an AMD profile would set its own AITER env here instead.
+    if [[ "$(vendor_detect)" == "nvidia" ]]; then
+        VENV="VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8=1 TORCH_CUDA_ARCH_LIST=${TORCH_CUDA_ARCH_LIST:-10.0} $VENV"
+    fi
     # OOM guard (KLAUD_DEBUG §2): VLLM_OOM_GUARD=1 disables the cudagraph mem profiler.
     [[ "${VLLM_OOM_GUARD:-0}" == "1" ]] && VENV="$VENV VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=0"
     case "$PROFILE" in
