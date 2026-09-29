@@ -68,10 +68,45 @@ def resolve_gen_python() -> str:
 
 
 def master_config(recipe_runner: str) -> Path:
-    """AMD runners live in amd-master.yaml, everything else in nvidia-master.yaml."""
-    amd = recipe_runner.startswith("mi")
-    name = "amd-master.yaml" if amd else "nvidia-master.yaml"
-    return REPO / ".github" / "configs" / name
+    """AMD runners live in amd-master.yaml, everything else in nvidia-master.yaml.
+
+    Upstream moved the configs from .github/configs/ to configs/, so try both --
+    this also lets REPO point at an upstream checkout (see --repo).
+    """
+    token = recipe_runner.split(":")[-1]          # 'cluster:mi355x-amds' -> 'mi355x-amds'
+    name = "amd-master.yaml" if token.startswith("mi") else "nvidia-master.yaml"
+    for rel in ("configs", ".github/configs"):
+        p = REPO / rel / name
+        if p.exists():
+            return p
+    raise SystemExit(f"no {name} under {REPO}/configs or {REPO}/.github/configs")
+
+
+def runner_config() -> Path | None:
+    """Newer generators require --runner-config; older ones do not accept it."""
+    for rel in ("configs", ".github/configs"):
+        p = REPO / rel / "runners.yaml"
+        if p.exists():
+            return p
+    return None
+
+
+def paths_from_lib(var: str, fallback: str) -> str:
+    """Read a TR_* path by sourcing lib/paths.sh.
+
+    paths.sh is bash (it sources the gitignored paths.local.sh), so a Python
+    driver cannot see its exports. Reading the env var alone silently wrote
+    results to /tmp instead of the configured array.
+    """
+    if os.environ.get(var):
+        return os.environ[var]
+    lib = TR_ROOT / "lib" / "paths.sh"
+    if lib.exists():
+        out = subprocess.run(["bash", "-c", f'source "{lib}" >/dev/null 2>&1; printf %s "${var}"'],
+                             capture_output=True, text=True).stdout.strip()
+        if out:
+            return out
+    return fallback
 
 
 def detect_hw() -> str:
@@ -93,13 +128,26 @@ def detect_hw() -> str:
     raise SystemExit("could not detect hardware; pass --hw")
 
 
+def _generator_accepts(flag: str) -> bool:
+    """Older forks lack --scenario-type/--runner-config; probe instead of guessing."""
+    out = subprocess.run([resolve_gen_python(), str(GENERATOR), "full-sweep", "--help"],
+                         capture_output=True, text=True, cwd=REPO).stdout
+    return flag in out
+
+
 def generate_matrix(args) -> list[dict]:
     cmd = [resolve_gen_python(), str(GENERATOR), "full-sweep",
            "--config-files", str(master_config(args.recipe_runner)),
            "--model-prefix", args.model_prefix,
            "--framework", args.framework,
-           "--runner-type", args.recipe_runner,
-           "--seq-lens", args.seq_lens]
+           "--runner-type", args.recipe_runner]
+    rc = runner_config()
+    if rc and _generator_accepts("--runner-config"):
+        cmd += ["--runner-config", str(rc)]
+    if _generator_accepts("--scenario-type"):
+        cmd += ["--scenario-type", args.scenario]
+    if args.scenario == "fixed-seq-len":
+        cmd += ["--seq-lens", args.seq_lens]
     proc = subprocess.run(cmd, cwd=REPO, capture_output=True, text=True)
     if proc.returncode != 0:
         raise SystemExit(f"matrix generation failed:\n{proc.stderr.strip()}")
@@ -114,8 +162,8 @@ def generate_matrix(args) -> list[dict]:
 
 def result_filename(e: dict, runner: str) -> str:
     return (f'{e["exp-name"]}_{e["precision"]}_{e["framework"]}'
-            f'_tp{e["tp"]}-ep{e["ep"]}-dpa{str(e["dp-attn"]).lower()}'
-            f'_disagg-{str(e["disagg"]).lower()}_spec-{e["spec-decoding"]}'
+            f'_tp{e["tp"]}-ep{e.get("ep", 1)}-dpa{str(e.get("dp-attn", False)).lower()}'
+            f'_disagg-{str(e.get("disagg", False)).lower()}_spec-{e.get("spec-decoding", "none")}'
             f'_conc{e["conc"]}_{runner}')
 
 
@@ -128,18 +176,37 @@ def build_env(e: dict, args, work_dir: Path, rf: str) -> dict:
     env = dict(os.environ)
     env.update({
         "MODEL": args.model_path or e["model"],
-        "TP": str(e["tp"]), "EP_SIZE": str(e["ep"]),
-        "DP_ATTENTION": str(e["dp-attn"]).lower(), "CONC": str(e["conc"]),
-        "ISL": str(e["isl"]), "OSL": str(e["osl"]),
-        "MAX_MODEL_LEN": str(e["max-model-len"]),
-        "RANDOM_RANGE_RATIO": "0.8", "RESULT_FILENAME": rf,
+        "TP": str(e["tp"]), "EP_SIZE": str(e.get("ep", 1)),
+        "DP_ATTENTION": str(e.get("dp-attn", False)).lower(), "CONC": str(e["conc"]),
+        "RESULT_FILENAME": rf,
         "IMAGE": e["image"], "FRAMEWORK": e["framework"],
         "PRECISION": e["precision"], "EXP_NAME": e["exp-name"],
-        "SPEC_DECODING": e["spec-decoding"], "DISAGG": str(e["disagg"]).lower(),
+        "SPEC_DECODING": e.get("spec-decoding", "none"),
+        "DISAGG": str(e.get("disagg", False)).lower(),
         "MODEL_PREFIX": e["model-prefix"], "RUNNER_TYPE": args.hw,
-        "RECIPE_RUNNER": args.recipe_runner,
+        "RECIPE_RUNNER": args.recipe_runner.split(":")[-1].split("-")[0],
+        "SCENARIO_TYPE": args.scenario,
+        "PP_SIZE": str(e.get("pp", 1)),
+        "DCP_SIZE": str(e.get("dcp-size", 1)),
+        "PCP_SIZE": str(e.get("pcp-size", 1)),
         "WORK_DIR": str(work_dir), "PORT": str(args.port),
     })
+    if args.scenario == "agentic-coding":
+        env.update({
+            "KV_OFFLOADING": str(e.get("kv-offloading", "none")),
+            "TOTAL_CPU_DRAM_GB": str(e.get("total-cpu-dram-gb", 0)),
+            "DURATION": str(args.duration or e.get("duration", 3600)),
+            "RESULT_DIR": "/workspace/results",
+            # CI sets these to '0' for agentic rather than unsetting them.
+            "ISL": "0", "OSL": "0", "MAX_MODEL_LEN": "0",
+            "RANDOM_RANGE_RATIO": "0.8",
+        })
+    else:
+        env.update({
+            "ISL": str(e["isl"]), "OSL": str(e["osl"]),
+            "MAX_MODEL_LEN": str(e["max-model-len"]),
+            "RANDOM_RANGE_RATIO": "0.8",
+        })
     if args.gpus:
         env["GPUS"] = args.gpus
     return env
@@ -153,6 +220,25 @@ def harvest(work_dir: Path, out_dir: Path, rf: str) -> Path:
             dst = out_dir / (name if name.startswith(("agg_", rf)) else f"{rf}.{name}")
             shutil.move(str(src), dst)
     return out_dir / f"agg_{rf}.json"
+
+
+def harvest_agentic(work_dir: Path, out_dir: Path, rf: str) -> list[Path]:
+    """Agentic writes a tree under RESULT_DIR instead of one flat result file."""
+    src = work_dir / "results"
+    moved = []
+    if src.is_dir():
+        dst = out_dir / rf
+        dst.mkdir(parents=True, exist_ok=True)
+        for item in src.iterdir():
+            target = dst / item.name
+            shutil.move(str(item), target)
+            moved.append(target)
+    for name in ("server.log", "gpu_metrics.csv"):
+        f = work_dir / name
+        if f.exists():
+            shutil.move(str(f), out_dir / f"{rf}.{name}")
+            moved.append(out_dir / f"{rf}.{name}")
+    return moved
 
 
 def stamp_provenance(agg_file: Path, e: dict, args) -> dict:
@@ -187,6 +273,15 @@ def run_one(e: dict, args, work_dir: Path, out_dir: Path) -> dict:
             shutil.copy(src, out_dir / f"{rf}.server.log")
         return {"config": rf, "status": "failed", "rc": rc}
 
+    if args.scenario == "agentic-coding":
+        # CI skips process_result.py for agentic-coding (benchmark-tmpl.yml gates
+        # it on `scenario-type != 'agentic-coding'`): the recipe already wrote its
+        # own record via write_agentic_result_json into RESULT_DIR. Running it
+        # anyway just fails on the missing fixed-seq-len fields.
+        files = harvest_agentic(work_dir, out_dir, rf)
+        print(f"[sweep] OK  agentic replay complete, {len(files)} artefact(s)", flush=True)
+        return {"config": rf, "status": "ok", "artefacts": [f.name for f in files]}
+
     # process_result.py reads ./$RESULT_FILENAME.json and writes agg_*.json
     subprocess.run([sys.executable, str(REPO / "utils" / "process_result.py")],
                    env=env, cwd=work_dir, check=True)
@@ -201,6 +296,12 @@ def main():
     p.add_argument("--model-prefix", required=True)
     p.add_argument("--framework", required=True)
     p.add_argument("--seq-lens", default="1k1k")
+    p.add_argument("--scenario", default="fixed-seq-len",
+                   choices=["fixed-seq-len", "agentic-coding"])
+    p.add_argument("--duration", type=int,
+                   help="override the agentic replay wall-clock seconds")
+    p.add_argument("--repo", help="drive recipes from another checkout "
+                                  "(e.g. an upstream worktree)")
     p.add_argument("--recipe-runner", default=None,
                    help="runner token in the recipe filename (mi355x, b200, h200, ...). "
                         "Defaults to --hw.")
@@ -215,23 +316,35 @@ def main():
                    "path instead of letting the recipe run `hf download`. Must live "
                    "under the mounted HF cache so the snapshot's relative blob "
                    "symlinks still resolve.")
-    p.add_argument("--work-dir",
-                   default=os.environ.get("TR_WORK_DIR", "/tmp/inferencex-work"))
+    p.add_argument("--work-dir", default=None,
+                   help="scratch dir mounted at /workspace; defaults to TR_WORK_DIR "
+                        "from lib/paths.sh (+ paths.local.sh)")
     p.add_argument("--out-dir", default=None)
     p.add_argument("--dry-run", action="store_true")
     args = p.parse_args()
+    if args.repo:
+        global REPO, GENERATOR
+        REPO = Path(args.repo).resolve()
+        GENERATOR = REPO / "utils" / "matrix_logic" / "generate_sweep_configs.py"
+        os.environ["REPO_ROOT"] = str(REPO)
+    if not args.work_dir:
+        args.work_dir = paths_from_lib("TR_WORK_DIR", "/tmp/inferencex-work")
     if not args.hw:
         args.hw = detect_hw()
     if not args.recipe_runner:
         args.recipe_runner = args.hw
+    print(f"[sweep] work_dir={args.work_dir}")
     print(f"[sweep] hw={args.hw} recipes={args.recipe_runner} "
-          f"config={master_config(args.recipe_runner).name}")
+          f"scenario={args.scenario} repo={REPO}\n"
+          f"[sweep] config={master_config(args.recipe_runner)}")
 
     matrix = generate_matrix(args)
     print(f"[sweep] {len(matrix)} config(s):")
     for e in matrix:
-        print(f"  tp={e['tp']} ep={e['ep']} conc={e['conc']} "
-              f"{e['isl']}/{e['osl']} {e['image']}")
+        shape = (f"{e['isl']}/{e['osl']}" if "isl" in e
+                 else f"{e.get('spec-decoding', 'none')} kv={e.get('kv-offloading', '-')}"
+                      f" dur={e.get('duration', '-')}s")
+        print(f"  tp={e['tp']} ep={e.get('ep', 1)} conc={e['conc']:<4} {shape}  {e['image']}")
     if args.dry_run:
         return
 
