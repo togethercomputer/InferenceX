@@ -110,7 +110,16 @@ vendor_set_gpu_flags() {
             if [[ -z "$ids" ]]; then VENDOR_GPU_FLAGS=(--gpus all)
             else VENDOR_GPU_FLAGS=(--gpus "device=${ids}"); fi ;;
         amd)
-            VENDOR_GPU_FLAGS=(--device=/dev/kfd --group-add video --group-add render
+            # Use NUMERIC gids, not names. --group-add resolves a name against
+            # the CONTAINER's /etc/group, and some ROCm images (e.g. the
+            # nightly-rocm100 ones) have no "render" group at all -- docker then
+            # refuses to start with "Unable to find group render". The numeric
+            # gid is what the kernel checks against /dev/kfd and /dev/dri, so it
+            # works whether or not the image knows the name.
+            local _vg _rg
+            _vg=$(getent group video  | cut -d: -f3); _vg="${_vg:-44}"
+            _rg=$(getent group render | cut -d: -f3); _rg="${_rg:-993}"
+            VENDOR_GPU_FLAGS=(--device=/dev/kfd --group-add "$_vg" --group-add "$_rg"
                               --security-opt seccomp=unconfined)
             mapfile -t _nodes < <(vendor_amd_render_nodes)
             if [[ -z "$ids" ]]; then
